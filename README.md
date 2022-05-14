@@ -1,6 +1,7 @@
 # What is Postgres-AQP？
 Postgres-AQP(Adaptive Query Processing) is a plugin which can support a new kind of adaptive query plan generation mode for PostgreSQL. 
-This mechanism can dynamically generate query plans in stages instead of one-time generation of query plans.
+This mechanism can dynamically generate different query plans in multiple stages instead of only one query plan.
 
-# Code Structure
-<img width="841" alt="image" src="https://user-images.githubusercontent.com/26684958/147406901-3ea97652-b5a9-4b37-844f-32302752d2f3.png">
+# How to become a developer for this item?
+If you want to join us, you can fork this repository and push your PR.
+But you have to read ‘PostgreSQL Coding Conventions’(https://www.postgresql.org/docs/current/source.html) before coding and obey the rules.
