@@ -4,4 +4,4 @@ This mechanism can dynamically generate different query plans in multiple stages
 
 # How to become a developer for this item?
 If you want to join us, you can fork this repository and push your PR.
-But it‘s better to read ‘PostgreSQL Coding Conventions’(https://www.postgresql.org/docs/current/source.html) before coding and you have to obey these rules.
+But it‘s better to read ‘PostgreSQL Coding Conventions’(https://www.postgresql.org/docs/current/source.html) before coding and you have to obey these rules in your PR.
