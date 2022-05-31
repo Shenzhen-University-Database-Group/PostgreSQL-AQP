@@ -780,6 +780,15 @@ typedef struct Material
 	Plan		plan;
 } Material;
 
+/*
+ * AQP
+ */
+typedef struct MaterialAnalyze
+{
+	Plan		plan;
+	int			version;
+}			MaterialAnalyze;
+
 /* ----------------
  *		memoize node
  * ----------------

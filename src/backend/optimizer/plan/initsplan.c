@@ -35,6 +35,12 @@
 #include "utils/lsyscache.h"
 #include "utils/typcache.h"
 
+/*
+ * AQP
+ */
+/* TODO: (Zackery) Maybe can create a new head file for aqp*/
+#include "utils/guc.h"
+
 /* These parameters are set by GUC */
 int			from_collapse_limit;
 int			join_collapse_limit;
@@ -1040,6 +1046,11 @@ deconstruct_recurse(PlannerInfo *root, Node *jtnode, bool below_outer_join,
 			/* OK to combine subproblems */
 			joinlist = list_concat(leftjoinlist, rightjoinlist);
 		}
+        else if(open_aqp)
+        {
+            /* TODO: (Zackery) these still have some problems, should figure out why should do these */
+            joinlist = list_concat(leftjoinlist, rightjoinlist);
+        }
 		else
 		{
 			/* can't combine, but needn't force join order above here */

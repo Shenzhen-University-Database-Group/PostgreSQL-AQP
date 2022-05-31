@@ -123,5 +123,11 @@ extern void ExplainOpenGroup(const char *objtype, const char *labelname,
 							 bool labeled, ExplainState *es);
 extern void ExplainCloseGroup(const char *objtype, const char *labelname,
 							  bool labeled, ExplainState *es);
+/*
+ * AQP
+ */
+extern void AQP_ExplainOnePlan(Query *query, int cursorOptions, IntoClause *into,
+                               ExplainState *es, const char *queryString, ParamListInfo params,
+                               QueryEnvironment *queryEnv);
 
 #endif							/* EXPLAIN_H */

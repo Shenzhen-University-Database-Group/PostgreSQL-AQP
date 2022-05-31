@@ -53,6 +53,235 @@ static void get_matching_part_pairs(PlannerInfo *root, RelOptInfo *joinrel,
 									RelOptInfo *rel1, RelOptInfo *rel2,
 									List **parts1, List **parts2);
 
+/*
+ * AQP - FUNCTION
+ *
+ * AQP_join_search_one_level
+ * AQP version of join_search_one_level
+ */
+void
+AQP_join_search_one_level(PlannerInfo *root, int level)
+{
+	List	  **joinrels = root->join_rel_level;
+	ListCell   *r;
+	int			k;
+
+	/* should be NULL in first time */
+	if (root->AQP_deepest_join_path == NULL)
+		Assert(joinrels[level] == NIL);
+
+	/* Set join_cur_level so that new joinrels are added to proper list */
+	root->join_cur_level = level;
+
+	/*
+	 * First, consider left-sided and right-sided plans, in which rels of
+	 * exactly level-1 member relations are joined against initial relations.
+	 * We prefer to join using join clauses, but if we find a rel of level-1
+	 * members that has no join clauses, we will generate Cartesian-product
+	 * joins against all initial rels not already contained in it.
+	 */
+	foreach(r, joinrels[level - 1])
+	{
+		RelOptInfo *old_rel = (RelOptInfo *) lfirst(r);
+
+		/* If it is not a subset, skip the update */
+		if (root->AQP_deepest_join_path != NULL &&
+			!bms_is_subset(root->AQP_deepest_join_path->parent->relids, old_rel->relids))
+			continue;
+
+		if (old_rel->joininfo != NIL || old_rel->has_eclass_joins ||
+			has_join_restriction(root, old_rel))
+		{
+			/*
+			 * There are join clauses or join order restrictions relevant to
+			 * this rel, so consider joins between this rel and (only) those
+			 * initial rels it is linked to by a clause or restriction.
+			 *
+			 * At level 2 this condition is symmetric, so there is no need to
+			 * look at initial rels before this one in the list; we already
+			 * considered such joins when we were at the earlier rel.  (The
+			 * mirror-image joins are handled automatically by make_join_rel.)
+			 * In later passes (level > 2), we join rels of the previous level
+			 * to each initial rel they don't already include but have a join
+			 * clause or restriction with.
+			 */
+			List	   *other_rels_list;
+			ListCell   *other_rels;
+
+			if (level == 2)		/* consider remaining initial rels */
+			{
+				other_rels_list = joinrels[level - 1];
+				other_rels = lnext(other_rels_list, r);
+			}
+			else				/* consider all initial rels */
+			{
+				other_rels_list = joinrels[1];
+				other_rels = list_head(other_rels_list);
+			}
+
+			make_rels_by_clause_joins(root,
+									  old_rel,
+									  other_rels_list,
+									  other_rels);
+		}
+		else
+		{
+			/*
+			 * Oops, we have a relation that is not joined to any other
+			 * relation, either directly or by join-order restrictions.
+			 * Cartesian product time.
+			 *
+			 * We consider a cartesian product with each not-already-included
+			 * initial rel, whether it has other join clauses or not.  At
+			 * level 2, if there are two or more clauseless initial rels, we
+			 * will redundantly consider joining them in both directions; but
+			 * such cases aren't common enough to justify adding complexity to
+			 * avoid the duplicated effort.
+			 */
+			make_rels_by_clauseless_joins(root,
+										  old_rel,
+										  joinrels[1]);
+		}
+	}
+
+	/*
+	 * Now, consider "bushy plans" in which relations of k initial rels are
+	 * joined to relations of level-k initial rels, for 2 <= k <= level-2.
+	 *
+	 * We only consider bushy-plan joins for pairs of rels where there is a
+	 * suitable join clause (or join order restriction), in order to avoid
+	 * unreasonable growth of planning time.
+	 */
+	for (k = 2;; k++)
+	{
+		int			other_level = level - k;
+
+		/*
+		 * Since make_join_rel(x, y) handles both x,y and y,x cases, we only
+		 * need to go as far as the halfway point.
+		 */
+		if (k > other_level)
+			break;
+
+		foreach(r, joinrels[k])
+		{
+			RelOptInfo *old_rel = (RelOptInfo *) lfirst(r);
+
+			List	   *other_rels_list;
+			ListCell   *other_rels;
+			ListCell   *r2;
+
+			/*
+			 * We can ignore relations without join clauses here, unless they
+			 * participate in join-order restrictions --- then we might have
+			 * to force a bushy join plan.
+			 */
+			if (old_rel->joininfo == NIL && !old_rel->has_eclass_joins &&
+				!has_join_restriction(root, old_rel))
+				continue;
+
+			if (k == other_level)
+			{
+				/* only consider remaining rels */
+				other_rels_list = joinrels[k];
+				other_rels = lnext(other_rels_list, r);
+			}
+			else
+			{
+				other_rels_list = joinrels[other_level];
+				other_rels = list_head(other_rels_list);
+			}
+
+			for_each_cell(r2, other_rels_list, other_rels)
+			{
+				RelOptInfo *new_rel = (RelOptInfo *) lfirst(r2);
+
+                /* If it is not a subset, skip the update */
+				if (root->AQP_deepest_join_path != NULL &&
+					!bms_is_subset(root->AQP_deepest_join_path->parent->relids, old_rel->relids) &&
+					!bms_is_subset(root->AQP_deepest_join_path->parent->relids, new_rel->relids))
+					continue;
+
+				if (!bms_overlap(old_rel->relids, new_rel->relids))
+				{
+					/*
+					 * OK, we can build a rel of the right level from this
+					 * pair of rels.  Do so if there is at least one relevant
+					 * join clause or join order restriction.
+					 */
+					if (have_relevant_joinclause(root, old_rel, new_rel) ||
+						have_join_order_restriction(root, old_rel, new_rel))
+					{
+						(void) make_join_rel(root, old_rel, new_rel);
+					}
+				}
+			}
+		}
+	}
+
+	/*----------
+	 * Last-ditch effort: if we failed to find any usable joins so far, force
+	 * a set of cartesian-product joins to be generated.  This handles the
+	 * special case where all the available rels have join clauses but we
+	 * cannot use any of those clauses yet.  This can only happen when we are
+	 * considering a join sub-problem (a sub-joinlist) and all the rels in the
+	 * sub-problem have only join clauses with rels outside the sub-problem.
+	 * An example is
+	 *
+	 *		SELECT ... FROM a INNER JOIN b ON TRUE, c, d, ...
+	 *		WHERE a.w = c.x and b.y = d.z;
+	 *
+	 * If the "a INNER JOIN b" sub-problem does not get flattened into the
+	 * upper level, we must be willing to make a cartesian join of a and b;
+	 * but the code above will not have done so, because it thought that both
+	 * a and b have joinclauses.  We consider only left-sided and right-sided
+	 * cartesian joins in this case (no bushy).
+	 *----------
+	 */
+	if (joinrels[level] == NIL)
+	{
+		/*
+		 * This loop is just like the first one, except we always call
+		 * make_rels_by_clauseless_joins().
+		 */
+		foreach(r, joinrels[level - 1])
+		{
+			RelOptInfo *old_rel = (RelOptInfo *) lfirst(r);
+
+            /* If it is not a subset, skip the update */
+			if (root->AQP_deepest_join_path != NULL &&
+				!bms_is_subset(root->AQP_deepest_join_path->parent->relids, old_rel->relids))
+				continue;
+
+			make_rels_by_clauseless_joins(root,
+										  old_rel,
+										  joinrels[1]);
+		}
+
+		/*----------
+		 * When special joins are involved, there may be no legal way
+		 * to make an N-way join for some values of N.  For example consider
+		 *
+		 * SELECT ... FROM t1 WHERE
+		 *	 x IN (SELECT ... FROM t2,t3 WHERE ...) AND
+		 *	 y IN (SELECT ... FROM t4,t5 WHERE ...)
+		 *
+		 * We will flatten this query to a 5-way join problem, but there are
+		 * no 4-way joins that join_is_legal() will consider legal.  We have
+		 * to accept failure at level 4 and go on to discover a workable
+		 * bushy plan at level 5.
+		 *
+		 * However, if there are no special joins and no lateral references
+		 * then join_is_legal() should never fail, and so the following sanity
+		 * check is useful.
+		 *----------
+		 */
+		if (joinrels[level] == NIL &&
+			root->join_info_list == NIL &&
+			!root->hasLateralRTEs)
+			elog(ERROR, "failed to build any %d-way joins", level);
+	}
+}
 
 /*
  * join_search_one_level
@@ -750,7 +979,11 @@ make_join_rel(PlannerInfo *root, RelOptInfo *rel1, RelOptInfo *rel2)
 	 * If we've already proven this join is empty, we needn't consider any
 	 * more paths for it.
 	 */
-	if (is_dummy_rel(joinrel))
+    /*
+     * AQP
+     */
+    /* TODO: (Zackery) Maybe need to create a new function for aqp */
+	if (is_dummy_rel(joinrel) || joinrel->is_aqp_baserel)
 	{
 		bms_free(joinrelids);
 		return joinrel;

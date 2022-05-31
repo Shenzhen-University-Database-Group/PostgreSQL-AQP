@@ -496,10 +496,13 @@ init_execution_state(List *queryTree_list,
 				stmt->stmt_len = queryTree->stmt_len;
 			}
 			else
+                /*
+                 * AQP
+                 */
 				stmt = pg_plan_query(queryTree,
 									 fcache->src,
 									 CURSOR_OPT_PARALLEL_OK,
-									 NULL);
+									 NULL, NULL);
 
 			/*
 			 * Precheck all commands for validity in a function.  This should

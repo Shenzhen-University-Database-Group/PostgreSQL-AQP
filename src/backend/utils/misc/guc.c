@@ -610,6 +610,12 @@ int			tcp_keepalives_count;
 int			tcp_user_timeout;
 
 /*
+ * AQP
+ */
+bool		open_aqp = false;
+int			aqp_loops = 10;
+
+/*
  * SSL renegotiation was been removed in PostgreSQL 9.5, but we tolerate it
  * being set to zero (meaning never renegotiate) for backward compatibility.
  * This avoids breaking compatibility with clients that have never supported
@@ -2109,6 +2115,19 @@ static struct config_bool ConfigureNamesBool[] =
 		false,
 		NULL, NULL, NULL
 	},
+    /*
+     * AQP
+     */
+    {
+            {"open_aqp", PGC_USERSET, QUERY_TUNING_METHOD,
+             gettext_noop("Open the adpative query processing."),
+             NULL,
+             GUC_EXPLAIN
+            },
+            &open_aqp,
+            false,
+            NULL, NULL, NULL
+    },
 
 	/* End-of-list marker */
 	{
@@ -3539,6 +3558,19 @@ static struct config_int ConfigureNamesInt[] =
 		0, 0, INT_MAX,
 		check_client_connection_check_interval, NULL, NULL
 	},
+
+    /*
+     * AQP
+     */
+    {
+            {"aqp_loops", PGC_USERSET, QUERY_TUNING_OTHER,
+             gettext_noop(""),
+             gettext_noop("")
+            },
+            &aqp_loops,
+            2, 1, 50,
+            NULL, NULL, NULL
+    },
 
 	/* End-of-list marker */
 	{

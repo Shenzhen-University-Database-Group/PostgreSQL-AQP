@@ -64,6 +64,11 @@
 #include "utils/rel.h"
 #include "utils/selfuncs.h"
 #include "utils/syscache.h"
+/*
+ * AQP
+ */
+#include <nodes/aqpstate.h>
+#include <utils/guc.h>
 
 /* GUC parameters */
 double		cursor_tuple_fraction = DEFAULT_CURSOR_TUPLE_FRACTION;
@@ -245,6 +250,158 @@ static bool group_by_has_partkey(RelOptInfo *input_rel,
 								 List *groupClause);
 static int	common_prefix_cmp(const void *a, const void *b);
 
+/*
+ * AQP
+ */
+static void AQP_grouping_planner(PlannerInfo *root, double tuple_fraction);
+
+static void find_deepest_joinpath(PlannerInfo *root, Path *path);
+
+static void find_deepest_joinpath_recurse(PlannerInfo *root, Path *path, Path **deepest_join_path,
+										  int *join_path_depth);
+
+/*
+ * AQP - FUNCTION
+ */
+void find_deepest_joinpath_recurse(PlannerInfo *root, Path *path, Path **deepest_join_path,
+								   int *join_path_depth)
+{
+	if (path->parent->is_listrel)
+		return;
+	switch (path->type)
+	{
+		case T_Path:
+		case T_IndexPath:
+		case T_BitmapHeapPath:
+		case T_BitmapAndPath:
+		case T_BitmapOrPath:
+		case T_TidPath:
+		case T_TidRangePath:
+		case T_GroupResultPath:
+		case T_MaterialAnalyzePath:
+		case T_ForeignPath:
+		case T_CustomPath:
+		case T_MinMaxAggPath:
+			/*
+			 * TODO: (Zackery) Support these nodes
+			 * The following have subpaths but are not supported at the moment
+			 */
+		case T_AppendPath:
+		case T_MergeAppendPath:
+		case T_MemoizePath:
+		case T_SubqueryScanPath:
+		case T_SetOpPath:
+		case T_RecursiveUnionPath:
+		case T_LockRowsPath:
+		case T_ModifyTablePath:
+		case T_ProjectSetPath:
+			break;
+
+		case T_NestPath:
+		case T_HashPath:
+		case T_MergePath:
+			{
+				/* TODO: (Zackery) Support semi join and anti join */
+				if (((JoinPath *) path)->jointype == JOIN_SEMI || ((JoinPath *) path)->jointype == JOIN_ANTI)
+					break;
+
+				/* TODO: (Zackery) Support ValuesScan
+				 *
+				 * This case cannot be pushed further down because
+				 * there will be values that need to be executed before the underlying JOIN can be executed
+				 *
+				 * select * from (values (1, array[10,20]), (2, array[20,30]))
+				 * as v1(v1x,v1ys) left join (values (1, 10), (2, 20)) as
+				 * v2(v2x,v2y) on v2x = v1x left join unnest(v1ys) as u1(u1y)
+				 * on u1y = v2y;
+				 *
+				 * QUERY PLAN
+				 * ---------------------------------------------------------------------------------
+				 * Nested Loop Left Join  (cost=0.05..0.42 rows=2 width=48) ->
+				 * Values Scan on "*VALUES*"  (cost=0.00..0.03 rows=2
+				 * width=36) ->  Hash Right Join  (cost=0.05..0.22 rows=1
+				 * width=12) Hash Cond: (u1.u1y = "*VALUES*_1".column2)
+				 * Filter: ("*VALUES*_1".column1 = "*VALUES*".column1) ->
+				 * Function Scan on unnest u1  (cost=0.00..0.10 rows=10
+				 * width=4) ->  Hash  (cost=0.03..0.03 rows=2 width=8) ->
+				 * Values Scan on "*VALUES*_1"  (cost=0.00..0.03 rows=2
+				 * width=8)
+				 */
+
+				if (((JoinPath *) path)->outerjoinpath->pathtype == T_ValuesScan ||
+					((JoinPath *) path)->innerjoinpath->pathtype == T_ValuesScan)
+					break;
+
+				/* TODO: (Zackery) Support lateral */
+                /* if (((JoinPath *)path)->outerjoinpath->parent->lateral_vars != NIL || */
+                /*       ((JoinPath *)path)->innerjoinpath->parent->lateral_vars != NIL) */
+                /*          break; */
+
+				if (((JoinPath *) path)->path.parent->level < *join_path_depth)
+				{
+					*deepest_join_path = path;
+					*join_path_depth = ((JoinPath *) path)->path.parent->level;
+				}
+				find_deepest_joinpath_recurse(root, ((JoinPath *) path)->outerjoinpath, deepest_join_path,
+											  join_path_depth);
+				find_deepest_joinpath_recurse(root, ((JoinPath *) path)->innerjoinpath, deepest_join_path,
+											  join_path_depth);
+				break;
+			}
+
+		case T_MaterialPath:
+		case T_UniquePath:
+		case T_UpperUniquePath:
+		case T_GatherMergePath:
+		case T_GatherPath:
+			/* TODO: (Zackery) Need to further check these path nodes */
+		case T_IncrementalSortPath:
+		case T_GroupingSetsPath:
+		case T_SortPath:
+		case T_GroupPath:
+		case T_AggPath:
+		case T_WindowAggPath:
+		case T_LimitPath:
+			find_deepest_joinpath_recurse(root, ((SubPath *) path)->subpath, deepest_join_path,
+										  join_path_depth);
+			break;
+
+		case T_ProjectionPath:
+			{
+                /* TODO: (Zackery) Need to support projection */
+                /* ProjectionPath *ppath = (ProjectionPath *) path; */
+                /* if (ppath->subpath->type == T_NestPath || ppath->subpath->type == T_HashPath */
+                /*                                        || ppath->subpath->type == T_MergePath) */
+                /* find_deepest_joinpath_recurse(root, ppath->subpath, deepest_join_path, */
+                /*                                               join_path_depth); */
+				break;
+			}
+
+		default:
+			elog(ERROR, "unrecognized node type: %d",
+				 (int) path->pathtype);
+			break;
+	}
+}
+
+/*
+ * AQP - FUNCTION
+ */
+void
+find_deepest_joinpath(PlannerInfo *root, Path *path)
+{
+	int			join_path_depth = list_length(root->initial_rels);
+	Path	   *deepest_join_path = NULL;
+
+	find_deepest_joinpath_recurse(root, path, &deepest_join_path, &join_path_depth);
+
+	if (deepest_join_path == NULL)
+	{
+		root->AQP_deepest_join_path = path;
+	}
+	else
+		root->AQP_deepest_join_path = deepest_join_path;
+}
 
 /*****************************************************************************
  *
@@ -261,20 +418,409 @@ static int	common_prefix_cmp(const void *a, const void *b);
  *****************************************************************************/
 PlannedStmt *
 planner(Query *parse, const char *query_string, int cursorOptions,
-		ParamListInfo boundParams)
+		ParamListInfo boundParams, AQPState * aqp_state)
 {
 	PlannedStmt *result;
 
 	if (planner_hook)
-		result = (*planner_hook) (parse, query_string, cursorOptions, boundParams);
+		result = (*planner_hook) (parse, query_string, cursorOptions, boundParams, aqp_state);
 	else
-		result = standard_planner(parse, query_string, cursorOptions, boundParams);
+		result = standard_planner(parse, query_string, cursorOptions, boundParams, NULL);
 	return result;
+}
+
+/*
+ * AQP - FUNCTION
+ */
+PlannedStmt *
+AQP_planner(Query *parse, const char *query_string, int cursorOptions,
+            ParamListInfo boundParams, AQPState * aqp_state)
+{
+    /* Make sure that AQP_planner is not tuned elsewhere */
+    if (aqp_state == NULL || aqp_state->need_break)
+        return standard_planner(parse, query_string, cursorOptions, boundParams, NULL);
+
+    PlannedStmt *result;
+    PlannerGlobal *glob = NULL;
+    double		tuple_fraction = 0.0;
+    PlannerInfo *root = NULL;
+    RelOptInfo *final_rel;
+    Path	   *best_path;
+    Plan	   *top_plan;
+    ListCell   *lp,
+            *lr;
+
+    if (aqp_state->version == 1)
+    {
+        /*
+         * Set up global new_state for this planner invocation.  This data is
+         * needed across all levels of sub-Query that might exist in the given
+         * command, so we keep it in a separate struct that's linked to by
+         * each per-Query PlannerInfo.
+         */
+        glob = makeNode(PlannerGlobal);
+
+        glob->boundParams = boundParams;
+        glob->subplans = NIL;
+        glob->subroots = NIL;
+        glob->rewindPlanIDs = NULL;
+        glob->finalrtable = NIL;
+        glob->finalrowmarks = NIL;
+        glob->resultRelations = NIL;
+        glob->appendRelations = NIL;
+        glob->relationOids = NIL;
+        glob->invalItems = NIL;
+        glob->paramExecTypes = NIL;
+        glob->lastPHId = 0;
+        glob->lastRowMarkId = 0;
+        glob->lastPlanNodeId = 0;
+        glob->transientPlan = false;
+        glob->dependsOnRole = false;
+
+        /*
+         * Assess whether it's feasible to use parallel mode for this query.
+         * We can't do this in a standalone backend, or if the command will
+         * try to modify any data, or if this is a cursor operation, or if
+         * GUCs are set to values that don't permit parallelism, or if
+         * parallel-unsafe functions are present in the query tree.
+         *
+         * (Note that we do allow CREATE TABLE AS, SELECT INTO, and CREATE
+         * MATERIALIZED VIEW to use parallel plans, but as of now, only the
+         * leader backend writes into a completely new table.  In the future,
+         * we can extend it to allow workers to write into the table. However,
+         * to allow parallel updates and deletes, we have to solve other
+         * problems, especially around combo CIDs.)
+         *
+         * For now, we don't try to use parallel mode if we're running inside
+         * a parallel worker.  We might eventually be able to relax this
+         * restriction, but for now it seems best not to have parallel workers
+         * trying to create their own parallel workers.
+         */
+        if ((cursorOptions & CURSOR_OPT_PARALLEL_OK) != 0 &&
+            IsUnderPostmaster &&
+            parse->commandType == CMD_SELECT &&
+            !parse->hasModifyingCTE &&
+            max_parallel_workers_per_gather > 0 &&
+            !IsParallelWorker())
+        {
+            /* all the cheap tests pass, so scan the query tree */
+            /* TODO: (Zackery) Here we can consider not using AQP if there is a cursor */
+            glob->maxParallelHazard = max_parallel_hazard(parse);
+            glob->parallelModeOK = (glob->maxParallelHazard != PROPARALLEL_UNSAFE);
+        }
+        else
+        {
+            /* skip the query tree scan, just assume it's unsafe */
+            glob->maxParallelHazard = PROPARALLEL_UNSAFE;
+            glob->parallelModeOK = false;
+        }
+
+        /*
+         * glob->parallelModeNeeded is normally set to false here and changed
+         * to true during plan creation if a Gather or Gather Merge plan is
+         * actually created (cf. create_gather_plan,
+         * create_gather_merge_plan).
+         *
+         * However, if force_parallel_mode = on or force_parallel_mode =
+         * regress, then we impose parallel mode whenever it's safe to do so,
+         * even if the final plan doesn't use parallelism.  It's not safe to
+         * do so if the query contains anything parallel-unsafe;
+         * parallelModeOK will be false in that case.  Note that
+         * parallelModeOK can't change after this point. Otherwise, everything
+         * in the query is either parallel-safe or parallel-restricted, and in
+         * either case it should be OK to impose parallel-mode restrictions.
+         * If that ends up breaking something, then either some function the
+         * user included in the query is incorrectly labeled as parallel-safe
+         * or parallel-restricted when in reality it's parallel-unsafe, or
+         * else the query planner itself has a bug.
+         */
+        glob->parallelModeNeeded = glob->parallelModeOK &&
+                                   (force_parallel_mode != FORCE_PARALLEL_OFF);
+
+        /* Determine what fraction of the plan is likely to be scanned */
+        /* 这个可以考虑删掉 */
+        if (cursorOptions & CURSOR_OPT_FAST_PLAN)
+        {
+            /*
+             * We have no real idea how many tuples the user will ultimately
+             * FETCH from a cursor, but it is often the case that he doesn't
+             * want 'em all, or would prefer a fast-start plan anyway so that
+             * he can process some of the tuples sooner.  Use a GUC parameter
+             * to decide what fraction to optimize for.
+             */
+            tuple_fraction = cursor_tuple_fraction;
+
+            /*
+             * We document cursor_tuple_fraction as simply being a fraction,
+             * which means the edge cases 0 and 1 have to be treated specially
+             * here.  We convert 1 to 0 ("all the tuples") and 0 to a very
+             * small fraction.
+             */
+            if (tuple_fraction >= 1.0)
+                tuple_fraction = 0.0;
+            else if (tuple_fraction <= 0.0)
+                tuple_fraction = 1e-10;
+        }
+        else
+        {
+            /* Default assumption is we need all the tuples */
+            tuple_fraction = 0.0;
+        }
+
+        /* primary planning entry point (may recurse for subqueries) */
+        root = subquery_planner(glob, parse, NULL,
+                                false, tuple_fraction);
+    }
+    else
+    {
+        /* Update the cost of last stage materialanalyze path */
+        update_ma_path_cost(aqp_state->estate->all_ma_state, aqp_state->root->AQP_deepest_join_path);
+
+        root = aqp_state->root;
+        glob = aqp_state->root->glob;
+
+        AQP_grouping_planner(root, root->tuple_fraction);
+
+        /*
+         * If any initPlans were created in this query level, adjust the
+         * surviving Paths' costs and parallel-safety flags to account for
+         * them.  The initPlans won't actually get attached to the plan tree
+         * till create_plan() runs, but we must include their effects now.
+         */
+        final_rel = fetch_upper_rel(root, UPPERREL_FINAL, NULL);
+        SS_charge_for_initplans(root, final_rel);
+
+        /*
+         * Make sure we've identified the cheapest Path for the final rel. (By
+         * doing this here not in grouping_planner, we include initPlan costs
+         * in the decision, though it's unlikely that will change anything.)
+         */
+        set_cheapest(final_rel);
+    }
+
+    /* Select best Path and turn it into a Plan */
+    final_rel = fetch_upper_rel(root, UPPERREL_FINAL, NULL);
+    best_path = get_cheapest_fractional_path(final_rel, tuple_fraction);
+
+    /* We can't support lateral now */
+    /* TODO: (zackery) Support lateral */
+    if (root->hasLateralRTEs)
+    {
+        aqp_state->need_break = true;
+    }
+
+    /* aqp_loops can be configured */
+    if (aqp_state->version >= aqp_loops)
+    {
+        aqp_state->need_break = true;
+    }
+
+    if (!aqp_state->need_break)
+    {
+        find_deepest_joinpath(root, best_path);
+        if (root->AQP_deepest_join_path == best_path)
+        {
+            aqp_state->need_break = true;
+        }
+        else
+        {
+            RelOptInfo *rel = root->AQP_deepest_join_path->parent;
+
+            rel->aqp_version = aqp_state->version;
+            root->AQP_deepest_join_path = (Path *) create_materialanalyze_path(rel, root->AQP_deepest_join_path);
+            rel->is_aqp_baserel = true;
+
+            /* TODO: (Zackery) Delete and free useless pathlist, Consider the following code */
+            /* parent_rel->pathlist = foreach_delete_current(parent_rel->pathlist, p1); */
+
+            /* Can't be free directly, it will free all subpaths which are still useful */
+            /* list_free(rel->pathlist); */
+
+            List	   *dpath = NIL;
+            dpath = lappend(dpath, root->AQP_deepest_join_path);
+            rel->pathlist = dpath;
+            set_cheapest(rel);
+        }
+        top_plan = create_plan(root, root->AQP_deepest_join_path);
+    }
+    else
+    {
+        top_plan = create_plan(root, best_path);
+    }
+
+    /*
+     * If creating a plan for a scrollable cursor, make sure it can run
+     * backwards on demand.  Add a Material node at the top at need.
+     */
+    if (cursorOptions & CURSOR_OPT_SCROLL)
+    {
+        if (!ExecSupportsBackwardScan(top_plan))
+            top_plan = materialize_finished_plan(top_plan);
+    }
+
+    /*
+     * Optionally add a Gather node for testing purposes, provided this is
+     * actually a safe thing to do.
+     */
+    if (force_parallel_mode != FORCE_PARALLEL_OFF && top_plan->parallel_safe)
+    {
+        Gather	   *gather = makeNode(Gather);
+
+        /*
+         * If there are any initPlans attached to the formerly-top plan node,
+         * move them up to the Gather node; same as we do for Material node in
+         * materialize_finished_plan.
+         */
+        gather->plan.initPlan = top_plan->initPlan;
+        top_plan->initPlan = NIL;
+
+        gather->plan.targetlist = top_plan->targetlist;
+        gather->plan.qual = NIL;
+        gather->plan.lefttree = top_plan;
+        gather->plan.righttree = NULL;
+        gather->num_workers = 1;
+        gather->single_copy = true;
+        gather->invisible = (force_parallel_mode == FORCE_PARALLEL_REGRESS);
+
+        /*
+         * Since this Gather has no parallel-aware descendants to signal to,
+         * we don't need a rescan Param.
+         */
+        gather->rescan_param = -1;
+
+        /*
+         * Ideally we'd use cost_gather here, but setting up dummy path data
+         * to satisfy it doesn't seem much cleaner than knowing what it does.
+         */
+        gather->plan.startup_cost = top_plan->startup_cost +
+                                    parallel_setup_cost;
+        gather->plan.total_cost = top_plan->total_cost +
+                                  parallel_setup_cost + parallel_tuple_cost * top_plan->plan_rows;
+        gather->plan.plan_rows = top_plan->plan_rows;
+        gather->plan.plan_width = top_plan->plan_width;
+        gather->plan.parallel_aware = false;
+        gather->plan.parallel_safe = false;
+
+        /* use parallel mode for parallel plans. */
+        root->glob->parallelModeNeeded = true;
+
+        top_plan = &gather->plan;
+    }
+
+    /*
+     * If any Params were generated, run through the plan tree and compute
+     * each plan node's extParam/allParam sets.  Ideally we'd merge this into
+     * set_plan_references' tree traversal, but for now it has to be separate
+     * because we need to visit subplans before not after main plan.
+     */
+    if (glob->paramExecTypes != NIL)
+    {
+        Assert(list_length(glob->subplans) == list_length(glob->subroots));
+        forboth(lp, glob->subplans, lr, glob->subroots)
+        {
+            Plan	   *subplan = (Plan *) lfirst(lp);
+            PlannerInfo *subroot = lfirst_node(PlannerInfo, lr);
+
+            SS_finalize_plan(subroot, subplan);
+        }
+        SS_finalize_plan(root, top_plan);
+    }
+
+    /* final cleanup of the plan */
+    /* TODO: (Zackery) Figure out why these structs should be set NIL each time */
+    glob->finalrtable = NIL;
+    glob->resultRelations = NIL;
+    glob->finalrowmarks = NIL;
+    glob->appendRelations = NIL;
+    if (aqp_state->version == 1)
+    {
+        Assert(glob->finalrtable == NIL);
+        Assert(glob->finalrowmarks == NIL);
+        Assert(glob->resultRelations == NIL);
+        Assert(glob->appendRelations == NIL);
+    }
+    top_plan = set_plan_references(root, top_plan);
+    /* ... and the subplans (both regular subplans and initplans) */
+    Assert(list_length(glob->subplans) == list_length(glob->subroots));
+    /* TODO: (Zackery) Maybe has some problems */
+    if (aqp_state->version == 1)
+    {
+        forboth(lp, glob->subplans, lr, glob->subroots)
+        {
+            Plan	   *subplan = (Plan *) lfirst(lp);
+            PlannerInfo *subroot = lfirst_node(PlannerInfo, lr);
+
+            lfirst(lp) = set_plan_references(subroot, subplan);
+        }
+    }
+
+    /* build the PlannedStmt result */
+    result = makeNode(PlannedStmt);
+
+    result->commandType = parse->commandType;
+    result->queryId = parse->queryId;
+    result->hasReturning = (parse->returningList != NIL);
+    result->hasModifyingCTE = parse->hasModifyingCTE;
+    result->canSetTag = parse->canSetTag;
+    result->transientPlan = glob->transientPlan;
+    result->dependsOnRole = glob->dependsOnRole;
+    result->parallelModeNeeded = glob->parallelModeNeeded;
+    result->planTree = top_plan;
+    result->rtable = glob->finalrtable;
+    result->resultRelations = glob->resultRelations;
+    result->appendRelations = glob->appendRelations;
+    result->subplans = glob->subplans;
+    result->rewindPlanIDs = glob->rewindPlanIDs;
+    result->rowMarks = glob->finalrowmarks;
+    result->relationOids = glob->relationOids;
+    result->invalItems = glob->invalItems;
+    result->paramExecTypes = glob->paramExecTypes;
+    /* utilityStmt should be null, but we might as well copy it */
+    result->utilityStmt = parse->utilityStmt;
+    result->stmt_location = parse->stmt_location;
+    result->stmt_len = parse->stmt_len;
+
+    result->jitFlags = PGJIT_NONE;
+    if (jit_enabled && jit_above_cost >= 0 &&
+        top_plan->total_cost > jit_above_cost)
+    {
+        result->jitFlags |= PGJIT_PERFORM;
+
+        /*
+         * Decide how much effort should be put into generating better code.
+         */
+        if (jit_optimize_above_cost >= 0 &&
+            top_plan->total_cost > jit_optimize_above_cost)
+            result->jitFlags |= PGJIT_OPT3;
+        if (jit_inline_above_cost >= 0 &&
+            top_plan->total_cost > jit_inline_above_cost)
+            result->jitFlags |= PGJIT_INLINE;
+
+        /*
+         * Decide which operations should be JITed.
+         */
+        if (jit_expressions)
+            result->jitFlags |= PGJIT_EXPR;
+        if (jit_tuple_deforming)
+            result->jitFlags |= PGJIT_DEFORM;
+    }
+
+    /* TODO: (Zackery) Check for problems or not */
+    if (aqp_state->need_break)
+    {
+        if (glob->partition_directory != NULL)
+            DestroyPartitionDirectory(glob->partition_directory);
+    }
+
+    aqp_state->root = root;
+    aqp_state->root->glob = glob;
+
+    return result;
 }
 
 PlannedStmt *
 standard_planner(Query *parse, const char *query_string, int cursorOptions,
-				 ParamListInfo boundParams)
+				 ParamListInfo boundParams, AQPState * aqp_state)
 {
 	PlannedStmt *result;
 	PlannerGlobal *glob;
@@ -635,6 +1181,15 @@ subquery_planner(PlannerGlobal *glob, Query *parse,
 		root->wt_param_id = -1;
 	root->non_recursive_path = NULL;
 	root->partColsUpdated = false;
+
+    /*
+     * AQP
+     */
+	root->AQP_deepest_join_path = NULL;
+	root->AQP_join_cur_level = 0;
+	root->wflists = NULL;
+	root->activeWindows = NIL;
+	root->gset_data = NULL;
 
 	/*
 	 * If there is a WITH list, process each WITH query and either convert it
@@ -1202,6 +1757,388 @@ preprocess_phv_expression(PlannerInfo *root, Expr *expr)
 }
 
 /*--------------------
+ * AQP_grouping_planner
+ *	  This function is aqp version for grouping_planner
+ *--------------------
+ */
+static void
+AQP_grouping_planner(PlannerInfo *root, double tuple_fraction)
+{
+	Query	   *parse = root->parse;
+	int64		offset_est = 0;
+	int64		count_est = 0;
+	double		limit_tuples = -1.0;
+	bool		have_postponed_srfs = false;
+	PathTarget *final_target;
+	List	   *final_targets;
+	List	   *final_targets_contain_srfs;
+	bool		final_target_parallel_safe;
+	RelOptInfo *current_rel;
+	RelOptInfo *final_rel;
+	FinalPathExtraData extra;
+	ListCell   *lc;
+
+	/* Tweak caller-supplied tuple_fraction if have LIMIT/OFFSET */
+	if (parse->limitCount || parse->limitOffset)
+	{
+		tuple_fraction = preprocess_limit(root, tuple_fraction,
+										  &offset_est, &count_est);
+
+		/*
+		 * If we have a known LIMIT, and don't have an unknown OFFSET, we can
+		 * estimate the effects of using a bounded sort.
+		 */
+		if (count_est > 0 && offset_est >= 0)
+			limit_tuples = (double) count_est + (double) offset_est;
+	}
+
+	/* Make tuple_fraction accessible to lower-level routines */
+	root->tuple_fraction = tuple_fraction;
+
+	Assert(!parse->setOperations);
+	/* No set operations, do regular planning */
+	PathTarget *sort_input_target;
+	List	   *sort_input_targets;
+	List	   *sort_input_targets_contain_srfs;
+	bool		sort_input_target_parallel_safe;
+	PathTarget *grouping_target;
+	List	   *grouping_targets;
+	List	   *grouping_targets_contain_srfs;
+	bool		grouping_target_parallel_safe;
+	PathTarget *scanjoin_target;
+	List	   *scanjoin_targets;
+	List	   *scanjoin_targets_contain_srfs;
+	bool		scanjoin_target_parallel_safe;
+	bool		scanjoin_target_same_exprs;
+	bool		have_grouping;
+
+	struct WindowFuncLists *wflists = root->wflists;
+	List	   *activeWindows = root->activeWindows;
+	struct grouping_sets_data *gset_data = root->gset_data;
+
+	/* A recursive query should always have setOperations */
+	Assert(!root->hasRecursion);
+
+	/*
+	 * TODO: (Zackery) Part of the code here has been deleted,
+	 * we need to check again to see if there is any problem
+	 */
+
+	/*
+	 * Generate the best unsorted and presorted paths for the scan/join
+	 * portion of this Query, ie the processing represented by the FROM/WHERE
+	 * clauses.  (Note there may not be any presorted paths.) We also generate
+	 * (in standard_qp_callback) pathkey representations of the query's sort
+	 * clause, distinct clause, etc.
+	 */
+		current_rel = AQP_standard_join_search(root, list_length(root->initial_rels), root->initial_rels);
+
+	/*
+	 * Convert the query's result tlist into PathTarget format.
+	 *
+	 * Note: this cannot be done before query_planner() has performed
+	 * appendrel expansion, because that might add resjunk entries to
+	 * root->processed_tlist.  Waiting till afterwards is also helpful because
+	 * the target width estimates can use per-Var width numbers that were
+	 * obtained within query_planner().
+	 */
+	final_target = create_pathtarget(root, root->processed_tlist);
+	final_target_parallel_safe =
+		is_parallel_safe(root, (Node *) final_target->exprs);
+
+	/*
+	 * If ORDER BY was given, consider whether we should use a post-sort
+	 * projection, and compute the adjusted target for preceding steps if so.
+	 */
+	if (parse->sortClause)
+	{
+		sort_input_target = make_sort_input_target(root,
+												   final_target,
+												   &have_postponed_srfs);
+		sort_input_target_parallel_safe =
+			is_parallel_safe(root, (Node *) sort_input_target->exprs);
+	}
+	else
+	{
+		sort_input_target = final_target;
+		sort_input_target_parallel_safe = final_target_parallel_safe;
+	}
+
+	/*
+	 * If we have window functions to deal with, the output from any grouping
+	 * step needs to be what the window functions want; otherwise, it should
+	 * be sort_input_target.
+	 */
+	if (activeWindows)
+	{
+		grouping_target = make_window_input_target(root,
+												   final_target,
+												   activeWindows);
+		grouping_target_parallel_safe =
+			is_parallel_safe(root, (Node *) grouping_target->exprs);
+	}
+	else
+	{
+		grouping_target = sort_input_target;
+		grouping_target_parallel_safe = sort_input_target_parallel_safe;
+	}
+
+	/*
+	 * If we have grouping or aggregation to do, the topmost scan/join plan
+	 * node must emit what the grouping step wants; otherwise, it should emit
+	 * grouping_target.
+	 */
+	have_grouping = (parse->groupClause || parse->groupingSets ||
+					 parse->hasAggs || root->hasHavingQual);
+	if (have_grouping)
+	{
+		scanjoin_target = make_group_input_target(root, final_target);
+		scanjoin_target_parallel_safe =
+			is_parallel_safe(root, (Node *) scanjoin_target->exprs);
+	}
+	else
+	{
+		scanjoin_target = grouping_target;
+		scanjoin_target_parallel_safe = grouping_target_parallel_safe;
+	}
+
+	/*
+	 * If there are any SRFs in the targetlist, we must separate each of these
+	 * PathTargets into SRF-computing and SRF-free targets.  Replace each of
+	 * the named targets with a SRF-free version, and remember the list of
+	 * additional projection steps we need to add afterwards.
+	 */
+	if (parse->hasTargetSRFs)
+	{
+		/* final_target doesn't recompute any SRFs in sort_input_target */
+		split_pathtarget_at_srfs(root, final_target, sort_input_target,
+								 &final_targets,
+								 &final_targets_contain_srfs);
+		final_target = linitial_node(PathTarget, final_targets);
+		Assert(!linitial_int(final_targets_contain_srfs));
+		/* likewise for sort_input_target vs. grouping_target */
+		split_pathtarget_at_srfs(root, sort_input_target, grouping_target,
+								 &sort_input_targets,
+								 &sort_input_targets_contain_srfs);
+		sort_input_target = linitial_node(PathTarget, sort_input_targets);
+		Assert(!linitial_int(sort_input_targets_contain_srfs));
+		/* likewise for grouping_target vs. scanjoin_target */
+		split_pathtarget_at_srfs(root, grouping_target, scanjoin_target,
+								 &grouping_targets,
+								 &grouping_targets_contain_srfs);
+		grouping_target = linitial_node(PathTarget, grouping_targets);
+		Assert(!linitial_int(grouping_targets_contain_srfs));
+		/* scanjoin_target will not have any SRFs precomputed for it */
+		split_pathtarget_at_srfs(root, scanjoin_target, NULL,
+								 &scanjoin_targets,
+								 &scanjoin_targets_contain_srfs);
+		scanjoin_target = linitial_node(PathTarget, scanjoin_targets);
+		Assert(!linitial_int(scanjoin_targets_contain_srfs));
+	}
+	else
+	{
+		/* initialize lists; for most of these, dummy values are OK */
+		final_targets = final_targets_contain_srfs = NIL;
+		sort_input_targets = sort_input_targets_contain_srfs = NIL;
+		grouping_targets = grouping_targets_contain_srfs = NIL;
+		scanjoin_targets = list_make1(scanjoin_target);
+		scanjoin_targets_contain_srfs = NIL;
+	}
+
+	/* Apply scan/join target. */
+	scanjoin_target_same_exprs = list_length(scanjoin_targets) == 1
+		&& equal(scanjoin_target->exprs, current_rel->reltarget->exprs);
+	apply_scanjoin_target_to_paths(root, current_rel, scanjoin_targets,
+								   scanjoin_targets_contain_srfs,
+								   scanjoin_target_parallel_safe,
+								   scanjoin_target_same_exprs);
+
+	/*
+	 * Save the various upper-rel PathTargets we just computed into
+	 * root->upper_targets[].  The core code doesn't use this, but it provides
+	 * a convenient place for extensions to get at the info.  For consistency,
+	 * we save all the intermediate targets, even though some of the
+	 * corresponding upperrels might not be needed for this query.
+	 */
+	root->upper_targets[UPPERREL_FINAL] = final_target;
+	root->upper_targets[UPPERREL_ORDERED] = final_target;
+	root->upper_targets[UPPERREL_DISTINCT] = sort_input_target;
+	root->upper_targets[UPPERREL_WINDOW] = sort_input_target;
+	root->upper_targets[UPPERREL_GROUP_AGG] = grouping_target;
+
+	/*
+	 * If we have grouping and/or aggregation, consider ways to implement
+	 * that.  We build a new upperrel representing the output of this phase.
+	 */
+	if (have_grouping)
+	{
+		current_rel = create_grouping_paths(root,
+											current_rel,
+											grouping_target,
+											grouping_target_parallel_safe,
+											(grouping_sets_data *) gset_data);
+		/* Fix things up if grouping_target contains SRFs */
+		if (parse->hasTargetSRFs)
+			adjust_paths_for_srfs(root, current_rel,
+								  grouping_targets,
+								  grouping_targets_contain_srfs);
+	}
+
+	/*
+	 * If we have window functions, consider ways to implement those.  We
+	 * build a new upperrel representing the output of this phase.
+	 */
+	if (activeWindows)
+	{
+		current_rel = create_window_paths(root,
+										  current_rel,
+										  grouping_target,
+										  sort_input_target,
+										  sort_input_target_parallel_safe,
+										  (WindowFuncLists *) wflists,
+										  activeWindows);
+		/* Fix things up if sort_input_target contains SRFs */
+		if (parse->hasTargetSRFs)
+			adjust_paths_for_srfs(root, current_rel,
+								  sort_input_targets,
+								  sort_input_targets_contain_srfs);
+	}
+
+	/*
+	 * If there is a DISTINCT clause, consider ways to implement that. We
+	 * build a new upperrel representing the output of this phase.
+	 */
+	if (parse->distinctClause)
+	{
+		current_rel = create_distinct_paths(root,
+											current_rel);
+	}
+
+	/*
+	 * If ORDER BY was given, consider ways to implement that, and generate a
+	 * new upperrel containing only paths that emit the correct ordering and
+	 * project the correct final_target.  We can apply the original
+	 * limit_tuples limit in sort costing here, but only if there are no
+	 * postponed SRFs.
+	 */
+	if (parse->sortClause)
+	{
+		current_rel = create_ordered_paths(root,
+										   current_rel,
+										   final_target,
+										   final_target_parallel_safe,
+										   have_postponed_srfs ? -1.0 :
+										   limit_tuples);
+		/* Fix things up if final_target contains SRFs */
+		if (parse->hasTargetSRFs)
+			adjust_paths_for_srfs(root, current_rel,
+								  final_targets,
+								  final_targets_contain_srfs);
+	}
+
+	/*
+	 * Now we are prepared to build the final-output upperrel.
+	 */
+	final_rel = fetch_upper_rel(root, UPPERREL_FINAL, NULL);
+
+	/*
+	 * If the input rel is marked consider_parallel and there's nothing that's
+	 * not parallel-safe in the LIMIT clause, then the final_rel can be marked
+	 * consider_parallel as well.  Note that if the query has rowMarks or is
+	 * not a SELECT, consider_parallel will be false for every relation in the
+	 * query.
+	 */
+	if (current_rel->consider_parallel &&
+		is_parallel_safe(root, parse->limitOffset) &&
+		is_parallel_safe(root, parse->limitCount))
+		final_rel->consider_parallel = true;
+
+	/*
+	 * If the current_rel belongs to a single FDW, so does the final_rel.
+	 */
+	final_rel->serverid = current_rel->serverid;
+	final_rel->userid = current_rel->userid;
+	final_rel->useridiscurrent = current_rel->useridiscurrent;
+	final_rel->fdwroutine = current_rel->fdwroutine;
+
+	/*
+	 * Generate paths for the final_rel.  Insert all surviving paths, with
+	 * LockRows, Limit, and/or ModifyTable steps added if needed.
+	 */
+	foreach(lc, current_rel->pathlist)
+	{
+		Path	   *path = (Path *) lfirst(lc);
+
+		/*
+		 * If there is a FOR [KEY] UPDATE/SHARE clause, add the LockRows node.
+		 * (Note: we intentionally test parse->rowMarks not root->rowMarks
+		 * here.  If there are only non-locking rowmarks, they should be
+		 * handled by the ModifyTable node instead.  However, root->rowMarks
+		 * is what goes into the LockRows node.)
+		 */
+		if (parse->rowMarks)
+		{
+			path = (Path *) create_lockrows_path(root, final_rel, path,
+												 root->rowMarks,
+												 assign_special_exec_param(root));
+		}
+
+		/*
+		 * If there is a LIMIT/OFFSET clause, add the LIMIT node.
+		 */
+		if (limit_needed(parse))
+		{
+			path = (Path *) create_limit_path(root, final_rel, path,
+											  parse->limitOffset,
+											  parse->limitCount,
+											  parse->limitOption,
+											  offset_est, count_est);
+		}
+
+		/* And shove it into final_rel */
+		add_path(final_rel, path);
+	}
+
+	/*
+	 * Generate partial paths for final_rel, too, if outer query levels might
+	 * be able to make use of them.
+	 */
+	if (final_rel->consider_parallel && root->query_level > 1 &&
+		!limit_needed(parse))
+	{
+		Assert(!parse->rowMarks && parse->commandType == CMD_SELECT);
+		foreach(lc, current_rel->partial_pathlist)
+		{
+			Path	   *partial_path = (Path *) lfirst(lc);
+
+			add_partial_path(final_rel, partial_path);
+		}
+	}
+
+	extra.limit_needed = limit_needed(parse);
+	extra.limit_tuples = limit_tuples;
+	extra.count_est = count_est;
+	extra.offset_est = offset_est;
+
+	/*
+	 * If there is an FDW that's responsible for all baserels of the query,
+	 * let it consider adding ForeignPaths.
+	 */
+	if (final_rel->fdwroutine &&
+		final_rel->fdwroutine->GetForeignUpperPaths)
+		final_rel->fdwroutine->GetForeignUpperPaths(root, UPPERREL_FINAL,
+													current_rel, final_rel,
+													&extra);
+
+	/* Let extensions possibly add some more paths */
+	if (create_upper_paths_hook)
+		(*create_upper_paths_hook) (root, UPPERREL_FINAL,
+									current_rel, final_rel, &extra);
+
+	/* Note: currently, we leave it to callers to do set_cheapest() */
+}
+
+/*--------------------
  * grouping_planner
  *	  Perform planning steps related to grouping, aggregation, etc.
  *
@@ -1354,6 +2291,10 @@ grouping_planner(PlannerInfo *root, double tuple_fraction)
 		if (parse->groupingSets)
 		{
 			gset_data = preprocess_grouping_sets(root);
+            /*
+             * AQP
+             */
+			root->gset_data = (struct grouping_sets_data *) gset_data;
 		}
 		else
 		{
@@ -1398,6 +2339,11 @@ grouping_planner(PlannerInfo *root, double tuple_fraction)
 				activeWindows = select_active_windows(root, wflists);
 			else
 				parse->hasWindowFuncs = false;
+            /*
+             * AQP
+             */
+			root->activeWindows = activeWindows;
+			root->wflists = (struct WindowFuncLists *) wflists;
 		}
 
 		/*

@@ -27,6 +27,7 @@ OBJS = \
 	read.o \
 	readfuncs.o \
 	tidbitmap.o \
-	value.o
+	value.o \
+	aqpstate.o
 
 include $(top_srcdir)/src/backend/common.mk

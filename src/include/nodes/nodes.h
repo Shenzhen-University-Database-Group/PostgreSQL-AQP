@@ -95,6 +95,10 @@ typedef enum NodeTag
 	T_PartitionPruneStepOp,
 	T_PartitionPruneStepCombine,
 	T_PlanInvalItem,
+    /*
+     * AQP
+     */
+    T_MaterialAnalyze,
 
 	/*
 	 * TAGS FOR PLAN STATE NODES (execnodes.h)
@@ -146,6 +150,12 @@ typedef enum NodeTag
 	T_SetOpState,
 	T_LockRowsState,
 	T_LimitState,
+
+    /*
+     * AQP
+     */
+    T_MaterialAnalyzeState,
+    T_AQPState,
 
 	/*
 	 * TAGS FOR PRIMITIVE NODES (primnodes.h)
@@ -280,6 +290,11 @@ typedef enum NodeTag
 	T_RollupData,
 	T_GroupingSetData,
 	T_StatisticExtInfo,
+
+    /*
+     * AQP
+     */
+    T_MaterialAnalyzePath,
 
 	/*
 	 * TAGS FOR MEMORY NODES (memnodes.h)

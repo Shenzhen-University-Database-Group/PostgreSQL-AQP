@@ -53,8 +53,11 @@ delay_execution_planner(Query *parse, const char *query_string,
 		result = prev_planner_hook(parse, query_string, cursorOptions,
 								   boundParams);
 	else
+        /*
+         * AQP
+         */
 		result = standard_planner(parse, query_string, cursorOptions,
-								  boundParams);
+								  boundParams, NULL);
 
 	/* If enabled, delay by taking and releasing the specified lock */
 	if (post_planning_lock_id != 0)

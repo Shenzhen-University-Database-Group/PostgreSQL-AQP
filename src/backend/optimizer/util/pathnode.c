@@ -35,6 +35,11 @@
 #include "utils/memutils.h"
 #include "utils/selfuncs.h"
 
+/*
+ * AQP
+ */
+#include "utils/guc.h"
+
 typedef enum
 {
 	COSTS_EQUAL,				/* path costs are fuzzily equal */
@@ -326,19 +331,56 @@ set_cheapest(RelOptInfo *parent_rel)
 			 * better to keep, but if one is superior then we definitely
 			 * should keep that one.
 			 */
-			cmp = compare_path_costs(cheapest_startup_path, path, STARTUP_COST);
-			if (cmp > 0 ||
-				(cmp == 0 &&
-				 compare_pathkeys(cheapest_startup_path->pathkeys,
-								  path->pathkeys) == PATHKEYS_BETTER2))
-				cheapest_startup_path = path;
+            /*
+             * AQP
+             */
+            /* TODO: (Zackery) Maybe need to create a new function */
+            if (open_aqp)
+            {
+                if (path->manode_num == cheapest_startup_path->manode_num)
+                {
+                    cmp = compare_path_costs(cheapest_startup_path, path, STARTUP_COST);
+                    if (cmp > 0 ||
+                        (cmp == 0 &&
+                         compare_pathkeys(cheapest_startup_path->pathkeys,
+                                          path->pathkeys) == PATHKEYS_BETTER2))
+                        cheapest_startup_path = path;
+                }
+                else if (path->manode_num > cheapest_startup_path->manode_num)
+                {
+                    cheapest_startup_path = path;
+                }
 
-			cmp = compare_path_costs(cheapest_total_path, path, TOTAL_COST);
-			if (cmp > 0 ||
-				(cmp == 0 &&
-				 compare_pathkeys(cheapest_total_path->pathkeys,
-								  path->pathkeys) == PATHKEYS_BETTER2))
-				cheapest_total_path = path;
+                if (path->manode_num == cheapest_total_path->manode_num)
+                {
+                    cmp = compare_path_costs(cheapest_total_path, path, TOTAL_COST);
+                    if (cmp > 0 ||
+                        (cmp == 0 &&
+                         compare_pathkeys(cheapest_total_path->pathkeys,
+                                          path->pathkeys) == PATHKEYS_BETTER2))
+                        cheapest_total_path = path;
+                }
+                else if (path->manode_num > cheapest_total_path->manode_num)
+                {
+                    cheapest_total_path = path;
+                }
+            }
+            else
+            {
+                cmp = compare_path_costs(cheapest_startup_path, path, STARTUP_COST);
+                if (cmp > 0 ||
+                    (cmp == 0 &&
+                     compare_pathkeys(cheapest_startup_path->pathkeys,
+                                      path->pathkeys) == PATHKEYS_BETTER2))
+                    cheapest_startup_path = path;
+
+                cmp = compare_path_costs(cheapest_total_path, path, TOTAL_COST);
+                if (cmp > 0 ||
+                    (cmp == 0 &&
+                     compare_pathkeys(cheapest_total_path->pathkeys,
+                                      path->pathkeys) == PATHKEYS_BETTER2))
+                    cheapest_total_path = path;
+            }
 		}
 	}
 
@@ -453,6 +495,18 @@ add_path(RelOptInfo *parent_rel, Path *new_path)
 		 */
 		costcmp = compare_path_costs_fuzzily(new_path, old_path,
 											 STD_FUZZ_FACTOR);
+
+        /*
+         * AQP
+         */
+        if (new_path->manode_num != old_path->manode_num)
+        {
+            if (new_path->manode_num > old_path->manode_num)
+                accept_new = true;
+            else
+                accept_new = false;
+            continue;
+        }
 
 		/*
 		 * If the two paths compare differently for startup and total cost,
@@ -707,6 +761,17 @@ add_path_precheck(RelOptInfo *parent_rel,
 }
 
 /*
+ * AQP - FUNCTION
+ */
+bool
+add_path_precheck_manode_num(Path *inner_path, Path *outer_path)
+{
+	if (inner_path->manode_num == 0 && outer_path->manode_num == 0)
+		return false;
+	return true;
+}
+
+/*
  * add_partial_path
  *	  Like add_path, our goal here is to consider whether a path is worthy
  *	  of being kept around, but the considerations here are a bit different.
@@ -773,6 +838,18 @@ add_partial_path(RelOptInfo *parent_rel, Path *new_path)
 
 		/* Compare pathkeys. */
 		keyscmp = compare_pathkeys(new_path->pathkeys, old_path->pathkeys);
+
+        /*
+         * AQP
+         */
+        if (new_path->manode_num != old_path->manode_num)
+        {
+            if (new_path->manode_num > old_path->manode_num)
+                accept_new = true;
+            else
+                accept_new = false;
+            continue;
+        }
 
 		/* Unless pathkeys are incompatible, keep just one of the two paths. */
 		if (keyscmp != PATHKEYS_DIFFERENT)
@@ -941,6 +1018,11 @@ create_seqscan_path(PlannerInfo *root, RelOptInfo *rel,
 	pathnode->parallel_workers = parallel_workers;
 	pathnode->pathkeys = NIL;	/* seqscan has unordered result */
 
+    /*
+     * AQP
+     */
+	pathnode->manode_num = 0;
+
 	cost_seqscan(pathnode, root, rel, pathnode->param_info);
 
 	return pathnode;
@@ -964,6 +1046,11 @@ create_samplescan_path(PlannerInfo *root, RelOptInfo *rel, Relids required_outer
 	pathnode->parallel_safe = rel->consider_parallel;
 	pathnode->parallel_workers = 0;
 	pathnode->pathkeys = NIL;	/* samplescan has unordered result */
+
+    /*
+     * AQP
+     */
+	pathnode->manode_num = 0;
 
 	cost_samplescan(pathnode, root, rel, pathnode->param_info);
 
@@ -1025,6 +1112,11 @@ create_index_path(PlannerInfo *root,
 	pathnode->indexorderbycols = indexorderbycols;
 	pathnode->indexscandir = indexscandir;
 
+    /*
+     * AQP
+     */
+	pathnode->path.manode_num = 0;
+
 	cost_index(pathnode, root, loop_count, partial_path);
 
 	return pathnode;
@@ -1067,6 +1159,11 @@ create_bitmap_heap_path(PlannerInfo *root,
 	cost_bitmap_heap_scan(&pathnode->path, root, rel,
 						  pathnode->path.param_info,
 						  bitmapqual, loop_count);
+
+    /*
+     * AQP
+     */
+	pathnode->path.manode_num = 0;
 
 	return pathnode;
 }
@@ -1120,6 +1217,11 @@ create_bitmap_and_path(PlannerInfo *root,
 	/* this sets bitmapselectivity as well as the regular cost fields: */
 	cost_bitmap_and_node(pathnode, root);
 
+    /*
+     * AQP
+     */
+	pathnode->path.manode_num = 0;
+
 	return pathnode;
 }
 
@@ -1172,6 +1274,11 @@ create_bitmap_or_path(PlannerInfo *root,
 	/* this sets bitmapselectivity as well as the regular cost fields: */
 	cost_bitmap_or_node(pathnode, root);
 
+    /*
+     * AQP
+     */
+	pathnode->path.manode_num = 0;
+
 	return pathnode;
 }
 
@@ -1199,6 +1306,11 @@ create_tidscan_path(PlannerInfo *root, RelOptInfo *rel, List *tidquals,
 
 	cost_tidscan(&pathnode->path, root, rel, tidquals,
 				 pathnode->path.param_info);
+
+    /*
+     * AQP
+     */
+	pathnode->path.manode_num = 0;
 
 	return pathnode;
 }
@@ -1228,6 +1340,11 @@ create_tidrangescan_path(PlannerInfo *root, RelOptInfo *rel,
 
 	cost_tidrangescan(&pathnode->path, root, rel, tidrangequals,
 					  pathnode->path.param_info);
+
+    /*
+     * AQP
+     */
+	pathnode->path.manode_num = 0;
 
 	return pathnode;
 }
@@ -1347,6 +1464,13 @@ create_append_path(PlannerInfo *root,
 	/* If the caller provided a row estimate, override the computed value. */
 	if (rows >= 0)
 		pathnode->path.rows = rows;
+
+
+    /*
+     * AQP
+     */
+    /* TODO: (Zackery) If support append in the future, manode_num can't be zero */
+	pathnode->path.manode_num = 0;
 
 	return pathnode;
 }
@@ -1490,6 +1614,12 @@ create_merge_append_path(PlannerInfo *root,
 						  input_startup_cost, input_total_cost,
 						  pathnode->path.rows);
 
+    /*
+     * AQP
+     */
+    /* TODO: (Zackery) If support append in the future, manode_num can't be zero */
+	pathnode->path.manode_num = 0;
+
 	return pathnode;
 }
 
@@ -1540,8 +1670,52 @@ create_group_result_path(PlannerInfo *root, RelOptInfo *rel,
 		pathnode->path.total_cost += qual_cost.startup + qual_cost.per_tuple;
 	}
 
+    /*
+     * AQP
+     */
+	pathnode->path.manode_num = 0;
+
 	return pathnode;
 }
+
+/*
+ * AQP - FUNCTION
+ *
+ * create_material_path
+ *	  Creates a path corresponding to a Material plan, returning the
+ *	  pathnode.
+ */
+MaterialAnalyzePath *
+create_materialanalyze_path(RelOptInfo *rel, Path *subpath)
+{
+	MaterialAnalyzePath *pathnode = makeNode(MaterialAnalyzePath);
+
+	Assert(subpath->parent == rel);
+
+	pathnode->path.pathtype = T_MaterialAnalyze;
+	pathnode->path.parent = rel;
+	pathnode->path.pathtarget = rel->reltarget;
+	pathnode->path.param_info = subpath->param_info;
+	pathnode->path.parallel_aware = false;
+	pathnode->path.parallel_safe = rel->consider_parallel &&
+		subpath->parallel_safe;
+	pathnode->path.parallel_workers = subpath->parallel_workers;
+	pathnode->path.pathkeys = subpath->pathkeys;
+
+	pathnode->subpath = subpath;
+
+	cost_material(&pathnode->path,
+				  subpath->startup_cost,
+				  subpath->total_cost,
+				  subpath->rows,
+				  subpath->pathtarget->width);
+
+/*     pathnode->path.manode_num = rel->aqp_version; */
+	pathnode->path.manode_num = subpath->manode_num + 1;
+
+	return pathnode;
+}
+
 
 /*
  * create_material_path
@@ -1572,6 +1746,11 @@ create_material_path(RelOptInfo *rel, Path *subpath)
 				  subpath->total_cost,
 				  subpath->rows,
 				  subpath->pathtarget->width);
+
+    /*
+     * AQP
+     */
+	pathnode->path.manode_num = subpath->manode_num;
 
 	return pathnode;
 }
@@ -1621,6 +1800,11 @@ create_memoize_path(PlannerInfo *root, RelOptInfo *rel, Path *subpath,
 	pathnode->path.startup_cost = subpath->startup_cost + cpu_tuple_cost;
 	pathnode->path.total_cost = subpath->total_cost + cpu_tuple_cost;
 	pathnode->path.rows = subpath->rows;
+
+    /*
+     * AQP
+     */
+	pathnode->path.manode_num = subpath->manode_num;
 
 	return pathnode;
 }
@@ -1846,6 +2030,11 @@ create_unique_path(PlannerInfo *root, RelOptInfo *rel, Path *subpath,
 
 	rel->cheapest_unique_path = (Path *) pathnode;
 
+    /*
+     * AQP
+     */
+	pathnode->path.manode_num = subpath->manode_num;
+
 	MemoryContextSwitchTo(oldcontext);
 
 	return pathnode;
@@ -1907,6 +2096,12 @@ create_gather_merge_path(PlannerInfo *root, RelOptInfo *rel, Path *subpath,
 
 	cost_gather_merge(pathnode, root, rel, pathnode->path.param_info,
 					  input_startup_cost, input_total_cost, rows);
+
+
+    /*
+     * AQP
+     */
+    pathnode->path.manode_num = subpath->manode_num;
 
 	return pathnode;
 }
@@ -1979,6 +2174,12 @@ create_gather_path(PlannerInfo *root, RelOptInfo *rel, Path *subpath,
 
 	cost_gather(pathnode, root, rel, pathnode->path.param_info, rows);
 
+
+    /*
+     * AQP
+     */
+    pathnode->path.manode_num = subpath->manode_num;
+
 	return pathnode;
 }
 
@@ -2007,6 +2208,11 @@ create_subqueryscan_path(PlannerInfo *root, RelOptInfo *rel, Path *subpath,
 
 	cost_subqueryscan(pathnode, root, rel, pathnode->path.param_info);
 
+    /*
+     * AQP
+     */
+    pathnode->path.manode_num = subpath->manode_num;
+
 	return pathnode;
 }
 
@@ -2032,6 +2238,11 @@ create_functionscan_path(PlannerInfo *root, RelOptInfo *rel,
 	pathnode->pathkeys = pathkeys;
 
 	cost_functionscan(pathnode, root, rel, pathnode->param_info);
+
+    /*
+     * AQP
+     */
+    pathnode->manode_num = 0;
 
 	return pathnode;
 }
@@ -2059,6 +2270,11 @@ create_tablefuncscan_path(PlannerInfo *root, RelOptInfo *rel,
 
 	cost_tablefuncscan(pathnode, root, rel, pathnode->param_info);
 
+    /*
+     * AQP
+     */
+    pathnode->manode_num = 0;
+
 	return pathnode;
 }
 
@@ -2085,6 +2301,11 @@ create_valuesscan_path(PlannerInfo *root, RelOptInfo *rel,
 
 	cost_valuesscan(pathnode, root, rel, pathnode->param_info);
 
+    /*
+     * AQP
+     */
+    pathnode->manode_num = 0;
+
 	return pathnode;
 }
 
@@ -2109,6 +2330,11 @@ create_ctescan_path(PlannerInfo *root, RelOptInfo *rel, Relids required_outer)
 	pathnode->pathkeys = NIL;	/* XXX for now, result is always unordered */
 
 	cost_ctescan(pathnode, root, rel, pathnode->param_info);
+
+    /*
+     * AQP
+     */
+    pathnode->manode_num = 0;
 
 	return pathnode;
 }
@@ -2136,6 +2362,11 @@ create_namedtuplestorescan_path(PlannerInfo *root, RelOptInfo *rel,
 
 	cost_namedtuplestorescan(pathnode, root, rel, pathnode->param_info);
 
+    /*
+     * AQP
+     */
+    pathnode->manode_num = 0;
+
 	return pathnode;
 }
 
@@ -2161,6 +2392,11 @@ create_resultscan_path(PlannerInfo *root, RelOptInfo *rel,
 	pathnode->pathkeys = NIL;	/* result is always unordered */
 
 	cost_resultscan(pathnode, root, rel, pathnode->param_info);
+
+    /*
+     * AQP
+     */
+    pathnode->manode_num = 0;
 
 	return pathnode;
 }
@@ -2188,6 +2424,11 @@ create_worktablescan_path(PlannerInfo *root, RelOptInfo *rel,
 
 	/* Cost is the same as for a regular CTE scan */
 	cost_ctescan(pathnode, root, rel, pathnode->param_info);
+
+    /*
+     * AQP
+     */
+    pathnode->manode_num = 0;
 
 	return pathnode;
 }
@@ -2232,6 +2473,11 @@ create_foreignscan_path(PlannerInfo *root, RelOptInfo *rel,
 
 	pathnode->fdw_outerpath = fdw_outerpath;
 	pathnode->fdw_private = fdw_private;
+
+    /*
+     * AQP
+     */
+    pathnode->path.manode_num = 0;
 
 	return pathnode;
 }
@@ -2283,6 +2529,11 @@ create_foreign_join_path(PlannerInfo *root, RelOptInfo *rel,
 	pathnode->fdw_outerpath = fdw_outerpath;
 	pathnode->fdw_private = fdw_private;
 
+    /*
+     * AQP
+     */
+    pathnode->path.manode_num = 0;
+
 	return pathnode;
 }
 
@@ -2327,6 +2578,11 @@ create_foreign_upper_path(PlannerInfo *root, RelOptInfo *rel,
 
 	pathnode->fdw_outerpath = fdw_outerpath;
 	pathnode->fdw_private = fdw_private;
+
+    /*
+     * AQP
+     */
+    pathnode->path.manode_num = 0;
 
 	return pathnode;
 }
@@ -2469,6 +2725,12 @@ create_nestloop_path(PlannerInfo *root,
 
 	final_cost_nestloop(root, pathnode, workspace, extra);
 
+    /*
+     * AQP
+     */
+	pathnode->path.manode_num = inner_path->manode_num > outer_path->manode_num ?
+		inner_path->manode_num : outer_path->manode_num;
+
 	return pathnode;
 }
 
@@ -2537,6 +2799,12 @@ create_mergejoin_path(PlannerInfo *root,
 	/* pathnode->materialize_inner will be set by final_cost_mergejoin */
 
 	final_cost_mergejoin(root, pathnode, workspace, extra);
+
+    /*
+     * AQP
+     */
+	pathnode->jpath.path.manode_num = inner_path->manode_num > outer_path->manode_num ?
+		inner_path->manode_num : outer_path->manode_num;
 
 	return pathnode;
 }
@@ -2611,6 +2879,12 @@ create_hashjoin_path(PlannerInfo *root,
 	/* final_cost_hashjoin will fill in pathnode->num_batches */
 
 	final_cost_hashjoin(root, pathnode, workspace, extra);
+
+    /*
+     * AQP
+     */
+    pathnode->jpath.path.manode_num = inner_path->manode_num > outer_path->manode_num ?
+		inner_path->manode_num : outer_path->manode_num;
 
 	return pathnode;
 }
@@ -2705,6 +2979,11 @@ create_projection_path(PlannerInfo *root,
 			target->cost.startup +
 			(cpu_tuple_cost + target->cost.per_tuple) * subpath->rows;
 	}
+
+    /*
+     * AQP
+     */
+	pathnode->path.manode_num = subpath->manode_num;
 
 	return pathnode;
 }
@@ -2874,6 +3153,11 @@ create_set_projection_path(PlannerInfo *root,
 		(cpu_tuple_cost + target->cost.per_tuple) * subpath->rows +
 		(pathnode->path.rows - subpath->rows) * cpu_tuple_cost / 2;
 
+    /*
+     * AQP
+     */
+	pathnode->path.manode_num = subpath->manode_num;
+
 	return pathnode;
 }
 
@@ -2925,6 +3209,11 @@ create_incremental_sort_path(PlannerInfo *root,
 
 	sort->nPresortedCols = presorted_keys;
 
+    /*
+     * AQP
+     */
+	pathnode->path.manode_num = subpath->manode_num;
+
 	return sort;
 }
 
@@ -2967,6 +3256,11 @@ create_sort_path(PlannerInfo *root,
 			  subpath->pathtarget->width,
 			  0.0,				/* XXX comparison_cost shouldn't be 0? */
 			  work_mem, limit_tuples);
+
+    /*
+     * AQP
+     */
+	pathnode->path.manode_num = subpath->manode_num;
 
 	return pathnode;
 }
@@ -3022,6 +3316,11 @@ create_group_path(PlannerInfo *root,
 	pathnode->path.total_cost += target->cost.startup +
 		target->cost.per_tuple * pathnode->path.rows;
 
+    /*
+     * AQP
+     */
+	pathnode->path.manode_num = subpath->manode_num;
+
 	return pathnode;
 }
 
@@ -3075,6 +3374,11 @@ create_upper_unique_path(PlannerInfo *root,
 	pathnode->path.total_cost = subpath->total_cost +
 		cpu_operator_cost * subpath->rows * numCols;
 	pathnode->path.rows = numGroups;
+
+    /*
+     * AQP
+     */
+    pathnode->path.manode_num = subpath->manode_num;
 
 	return pathnode;
 }
@@ -3140,6 +3444,11 @@ create_agg_path(PlannerInfo *root,
 	pathnode->path.startup_cost += target->cost.startup;
 	pathnode->path.total_cost += target->cost.startup +
 		target->cost.per_tuple * pathnode->path.rows;
+
+    /*
+     * AQP
+     */
+    pathnode->path.manode_num = subpath->manode_num;
 
 	return pathnode;
 }
@@ -3309,6 +3618,11 @@ create_groupingsets_path(PlannerInfo *root,
 	pathnode->path.total_cost += target->cost.startup +
 		target->cost.per_tuple * pathnode->path.rows;
 
+    /*
+     * AQP
+     */
+    pathnode->path.manode_num = subpath->manode_num;
+
 	return pathnode;
 }
 
@@ -3376,6 +3690,11 @@ create_minmaxagg_path(PlannerInfo *root,
 		pathnode->path.total_cost += qual_cost.startup + qual_cost.per_tuple;
 	}
 
+    /*
+     * AQP
+     */
+    pathnode->path.manode_num = 0;
+
 	return pathnode;
 }
 
@@ -3435,6 +3754,11 @@ create_windowagg_path(PlannerInfo *root,
 	pathnode->path.startup_cost += target->cost.startup;
 	pathnode->path.total_cost += target->cost.startup +
 		target->cost.per_tuple * pathnode->path.rows;
+
+    /*
+     * AQP
+     */
+    pathnode->path.manode_num = subpath->manode_num;
 
 	return pathnode;
 }
@@ -3499,6 +3823,11 @@ create_setop_path(PlannerInfo *root,
 		cpu_operator_cost * subpath->rows * list_length(distinctList);
 	pathnode->path.rows = outputRows;
 
+    /*
+     * AQP
+     */
+    pathnode->path.manode_num = subpath->manode_num;
+
 	return pathnode;
 }
 
@@ -3549,6 +3878,11 @@ create_recursiveunion_path(PlannerInfo *root,
 
 	cost_recursive_union(&pathnode->path, leftpath, rightpath);
 
+    /*
+     * AQP
+     */
+	pathnode->path.manode_num = 0;
+
 	return pathnode;
 }
 
@@ -3596,6 +3930,11 @@ create_lockrows_path(PlannerInfo *root, RelOptInfo *rel,
 	pathnode->path.startup_cost = subpath->startup_cost;
 	pathnode->path.total_cost = subpath->total_cost +
 		cpu_tuple_cost * subpath->rows;
+
+    /*
+     * AQP
+     */
+    pathnode->path.manode_num = subpath->manode_num;
 
 	return pathnode;
 }
@@ -3698,6 +4037,11 @@ create_modifytable_path(PlannerInfo *root, RelOptInfo *rel,
 	pathnode->onconflict = onconflict;
 	pathnode->epqParam = epqParam;
 
+    /*
+     * AQP
+     */
+    pathnode->path.manode_num = subpath->manode_num;
+
 	return pathnode;
 }
 
@@ -3753,6 +4097,11 @@ create_limit_path(PlannerInfo *root, RelOptInfo *rel,
 							&pathnode->path.startup_cost,
 							&pathnode->path.total_cost,
 							offset_est, count_est);
+
+    /*
+     * AQP
+     */
+    pathnode->path.manode_num = subpath->manode_num;
 
 	return pathnode;
 }

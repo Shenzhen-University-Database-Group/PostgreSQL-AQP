@@ -805,6 +805,11 @@ set_plan_refs(PlannerInfo *root, Plan *plan, int rtoffset)
 				break;
 			}
 
+            /*
+             * AQP
+             */
+        case T_MaterialAnalyze:
+
 		case T_Material:
 		case T_Sort:
 		case T_IncrementalSort:

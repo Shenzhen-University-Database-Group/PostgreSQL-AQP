@@ -332,5 +332,10 @@ extern RelOptInfo *build_child_join_rel(PlannerInfo *root,
 										RelOptInfo *outer_rel, RelOptInfo *inner_rel,
 										RelOptInfo *parent_joinrel, List *restrictlist,
 										SpecialJoinInfo *sjinfo, JoinType jointype);
+/*
+ * AQP
+ */
+extern bool add_path_precheck_manode_num(Path *inner_path, Path *outer_path);
+extern MaterialAnalyzePath * create_materialanalyze_path(RelOptInfo *rel, Path *subpath);
 
 #endif							/* PATHNODE_H */

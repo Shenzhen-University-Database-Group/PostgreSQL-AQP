@@ -2912,8 +2912,22 @@ make_rel_from_joinlist(PlannerInfo *root, List *joinlist)
 		}
 		else if (IsA(jlnode, List))
 		{
+            /*
+             * AQP - We can't handle subproblem now. So we close hook in this
+             * way
+             */
+			/* TODO: (Zackery) Supprot handle subproblem in AQP */
+			join_search_hook_type save_join_search_hook = join_search_hook;
+			join_search_hook = NULL;
+
 			/* Recurse to handle subproblem */
 			thisrel = make_rel_from_joinlist(root, (List *) jlnode);
+
+            /*
+             * AQP
+             */
+			thisrel->is_listrel = true;
+			join_search_hook = save_join_search_hook;
 		}
 		else
 		{
@@ -2950,6 +2964,110 @@ make_rel_from_joinlist(PlannerInfo *root, List *joinlist)
 		else
 			return standard_join_search(root, levels_needed, initial_rels);
 	}
+}
+
+/*
+ * AQP - FUNCTION
+ *
+ * AQP_standard_join_search
+ *    This function is implemented based on 'standard_join_search'
+ */
+RelOptInfo *
+AQP_standard_join_search(PlannerInfo *root, int levels_needed, List *initial_rels)
+{
+	int			lev;
+	RelOptInfo *rel;
+
+	/*
+	 * This function cannot be invoked recursively within any one planning
+	 * problem, so join_rel_level[] can't be in use already.
+	 */
+	/* Assert(root->join_rel_level == NULL); */
+
+	/*
+	 * We employ a simple "dynamic programming" algorithm: we first find all
+	 * ways to build joins of two jointree items, then all ways to build joins
+	 * of three items (from two-item joins and single items), then four-item
+	 * joins, and so on until we have considered all ways to join all the
+	 * items into one rel.
+	 *
+	 * root->join_rel_level[j] is a list of all the j-item rels.  Initially we
+	 * set root->join_rel_level[1] to represent all the single-jointree-item
+	 * relations.
+	 */
+	/* AQP */
+	if (root->AQP_join_cur_level == 0 || root->AQP_deepest_join_path == NULL)
+	{
+		root->join_rel_level = (List **) palloc0((levels_needed + 1) * sizeof(List *));
+		root->join_rel_level[1] = initial_rels;
+		root->AQP_join_cur_level = 2;
+	}
+	else
+	{
+		root->AQP_join_cur_level = root->AQP_deepest_join_path->parent->level + 1;
+	}
+
+	/* AQP */
+	for (lev = root->AQP_join_cur_level; lev <= levels_needed; lev++)
+	{
+		ListCell   *lc;
+
+		/*
+		 * Determine all possible pairs of relations to be joined at this
+		 * level, and build paths for making each one from every available
+		 * pair of lower-level relations.
+		 */
+		AQP_join_search_one_level(root, lev);
+
+		/*
+		 * Run generate_partitionwise_join_paths() and
+		 * generate_useful_gather_paths() for each just-processed joinrel.  We
+		 * could not do this earlier because both regular and partial paths
+		 * can get added to a particular joinrel at multiple times within
+		 * join_search_one_level.
+		 *
+		 * After that, we're done creating paths for the joinrel, so run
+		 * set_cheapest().
+		 */
+		foreach(lc, root->join_rel_level[lev])
+		{
+			rel = (RelOptInfo *) lfirst(lc);
+
+			/* 如果不包含，其实没有啥更新 */
+			if (root->AQP_deepest_join_path != NULL &&
+				!bms_is_subset(root->AQP_deepest_join_path->parent->relids, rel->relids))
+				continue;
+
+			/* Create paths for partitionwise joins. */
+			generate_partitionwise_join_paths(root, rel);
+
+			/*
+			 * Except for the topmost scan/join rel, consider gathering
+			 * partial paths.  We'll do the same for the topmost scan/join rel
+			 * once we know the final targetlist (see grouping_planner).
+			 */
+			if (lev < levels_needed)
+				generate_useful_gather_paths(root, rel, false);
+
+			/* Find and save the cheapest paths for this rel */
+			set_cheapest(rel);
+
+#ifdef OPTIMIZER_DEBUG
+			debug_print_rel(root, rel);
+#endif
+		}
+	}
+
+	/*
+	 * We should have a single rel at the final level.
+	 */
+	if (root->join_rel_level[levels_needed] == NIL)
+		elog(ERROR, "failed to build any %d-way joins", levels_needed);
+	Assert(list_length(root->join_rel_level[levels_needed]) == 1);
+
+	rel = (RelOptInfo *) linitial(root->join_rel_level[levels_needed]);
+
+	return rel;
 }
 
 /*

@@ -16,6 +16,10 @@
 
 #include "nodes/parsenodes.h"
 #include "utils/portal.h"
+/*
+ * AQP
+ */
+#include "nodes/aqpstate.h"
 
 struct PlannedStmt;				/* avoid including plannodes.h here */
 
@@ -47,5 +51,11 @@ extern uint64 PortalRunFetch(Portal portal,
 extern bool PlannedStmtRequiresSnapshot(struct PlannedStmt *pstmt);
 
 extern void EnsurePortalSnapshotExists(void);
+
+/*
+ * AQP
+ */
+extern void AQP_PortalStart(Portal portal, ParamListInfo params,
+                            int eflags, Snapshot snapshot, AQPState * aqp_state);
 
 #endif							/* PQUERY_H */

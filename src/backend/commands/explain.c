@@ -39,6 +39,10 @@
 #include "utils/tuplesort.h"
 #include "utils/typcache.h"
 #include "utils/xml.h"
+/*
+ * AQP
+ */
+#include <utils/backend_status.h>
 
 
 /* Hook for plugins to get control in ExplainOneQuery() */
@@ -155,6 +159,12 @@ static void ExplainYAMLLineStarting(ExplainState *es);
 static void escape_yaml(StringInfo buf, const char *str);
 
 
+/*
+ * AQP
+ */
+void	AQP_ExplainOnePlan(Query *query, int cursorOptions, IntoClause *into,
+                           ExplainState *es, const char *queryString, ParamListInfo params,
+                           QueryEnvironment *queryEnv);
 
 /*
  * ExplainQuery -
@@ -394,7 +404,10 @@ ExplainOneQuery(Query *query, int cursorOptions,
 		INSTR_TIME_SET_CURRENT(planstart);
 
 		/* plan the query */
-		plan = pg_plan_query(query, queryString, cursorOptions, params);
+        /*
+         * AQP
+         */
+		plan = pg_plan_query(query, queryString, cursorOptions, params, NULL);
 
 		INSTR_TIME_SET_CURRENT(planduration);
 		INSTR_TIME_SUBTRACT(planduration, planstart);
@@ -500,6 +513,264 @@ ExplainOneUtility(Node *utilityStmt, IntoClause *into, ExplainState *es,
 		else
 			ExplainDummyGroup("Utility Statement", NULL, es);
 	}
+}
+
+/*
+ * AQP - FUNCTION
+ *
+ * AQP version ExplainOneQuery
+ */
+void
+AQP_ExplainOnePlan(Query *query,
+				   int cursorOptions,
+				   IntoClause *into,
+				   ExplainState *es,
+				   const char *queryString,
+				   ParamListInfo params,
+				   QueryEnvironment *queryEnv)
+{
+	PlannedStmt *plannedstmt;
+	instr_time	planstart,
+				planend,
+				planduration;
+	instr_time	starttime;
+	BufferUsage bufusage_start,
+				bufusage;
+	int			instrument_option = 0;
+	double		totaltime = 0;
+	DestReceiver *dest;
+	QueryDesc  *queryDesc;
+	int			eflags;
+
+	/* AQP */
+	AQPState   *aqp_state;
+
+
+	INSTR_TIME_SET_ZERO(planduration);
+
+	/* AQP */
+	aqp_state = CreateAQPState();
+
+	if (es->buffers)
+		bufusage_start = pgBufferUsage;
+
+	if (es->analyze && es->timing)
+		instrument_option |= INSTRUMENT_TIMER;
+	else if (es->analyze)
+		instrument_option |= INSTRUMENT_ROWS;
+
+	if (es->buffers)
+		instrument_option |= INSTRUMENT_BUFFERS;
+	if (es->wal)
+		instrument_option |= INSTRUMENT_WAL;
+
+	/* calc differences of buffer counters. */
+	if (es->buffers)
+	{
+		memset(&bufusage, 0, sizeof(BufferUsage));
+		BufferUsageAccumDiff(&bufusage, &pgBufferUsage, &bufusage_start);
+	}
+
+	/* AQP */
+	while (!aqp_state->need_break)
+	{
+		if (aqp_state->version == 1)
+			aqp_state->need_break = JudgeQuery(query, aqp_state);
+		/* 切到给物理优化准备的上下文 */
+		/* oldcontext = MemoryContextSwitchTo(per_parsetree_context); */
+
+		INSTR_TIME_SET_CURRENT(planstart);
+
+		plannedstmt = pg_plan_query(query, queryString, cursorOptions, params, aqp_state);
+
+		INSTR_TIME_SET_CURRENT(planend);
+
+		INSTR_TIME_ACCUM_DIFF(planduration, planend, planstart);
+
+		/*
+		 * Switch back to transaction context for execution.
+		 */
+		/* MemoryContextSwitchTo(oldcontext); */
+
+		/*
+		 * We always collect timing for the entire statement, even when
+		 * node-level timing is off, so we don't look at es->timing here.  (We
+		 * could skip this if !es->summary, but it's hardly worth the
+		 * complication.)
+		 */
+		INSTR_TIME_SET_CURRENT(starttime);
+
+		/*
+		 * Use a snapshot with an updated command ID to ensure this query sees
+		 * results of any previously executed queries.
+		 */
+		if (aqp_state->version == 1)
+		{
+			PushCopiedSnapshot(GetActiveSnapshot());
+			UpdateActiveSnapshotCommandId();
+		}
+
+		/*
+		 * Normally we discard the query's output, but if explaining CREATE
+		 * TABLE AS, we'd better use the appropriate tuple receiver.
+		 */
+		if (into && aqp_state->need_break)
+			dest = CreateIntoRelDestReceiver(into);
+		else
+			dest = None_Receiver;
+
+		if (aqp_state->version == 1)
+		{
+			/* Create a QueryDesc for the query */
+			queryDesc = CreateQueryDesc(plannedstmt, queryString,
+										GetActiveSnapshot(), InvalidSnapshot,
+										dest, params, queryEnv, instrument_option);
+			queryDesc->aqp_state = aqp_state;
+		}
+		else
+		{
+			RedefineQueryDesc(queryDesc, plannedstmt,
+							  queryEnv);
+		}
+
+		/* Select execution options */
+		Assert(es->analyze);
+		eflags = 0;				/* default run-to-completion flags */
+
+		/* call ExecutorStart to prepare the plan for execution */
+		pgstat_report_query_id(queryDesc->plannedstmt->queryId, false);
+		if (aqp_state->need_break && aqp_state->version == 1)
+			standard_ExecutorStart(queryDesc, eflags);
+		else
+			AQP_standard_ExecutorStart(queryDesc, eflags);
+
+		/* 后续得重构 */
+		if (aqp_state->version == 1)
+		{
+			aqp_state->estate = queryDesc->estate;
+		}
+
+		/* Execute the plan for statistics if asked for */
+		/* 这里一定走的, 去掉了analyze */
+		ScanDirection dir;
+
+		/* EXPLAIN ANALYZE CREATE TABLE AS WITH NO DATA is weird */
+		if (into && into->skipData)
+			dir = NoMovementScanDirection;
+		else
+			dir = ForwardScanDirection;
+
+		/* run the plan */
+		ExecutorRun(queryDesc, dir, 0L, true);
+
+		if (aqp_state->need_break)
+		{
+			/* run cleanup too */
+			ExecutorFinish(queryDesc);
+		}
+
+		/* We can't run ExecutorEnd 'till we're done printing the stats... */
+		totaltime += elapsed_time(&starttime);
+		/* 直到这 */
+
+		if (aqp_state->need_break)
+		{
+			ExplainOpenGroup("Query", NULL, true, es);
+
+			/* Create textual dump of plan tree */
+			ExplainPrintPlan(es, queryDesc);
+
+			if (es->verbose && plannedstmt->queryId != UINT64CONST(0))
+			{
+				/*
+				 * Output the queryid as an int64 rather than a uint64 so we
+				 * match what would be seen in the BIGINT
+				 * pg_stat_statements.queryid column.
+				 */
+				ExplainPropertyInteger("Query Identifier", NULL, (int64)
+									   plannedstmt->queryId, es);
+			}
+
+			/* Show buffer usage in planning */
+			if (es->buffers)
+			{
+				ExplainOpenGroup("Planning", "Planning", true, es);
+				show_buffer_usage(es, &bufusage, true);
+				ExplainCloseGroup("Planning", "Planning", true, es);
+			}
+
+			if (es->summary)
+			{
+				double		plantime = INSTR_TIME_GET_DOUBLE(planduration);
+
+				ExplainPropertyFloat("Planning Time", "ms", 1000.0 * plantime, 3, es);
+			}
+
+			/* Print info about runtime of triggers */
+			if (es->analyze)
+				ExplainPrintTriggers(es, queryDesc);
+
+			/*
+			 * Print info about JITing. Tied to es->costs because we don't
+			 * want to display this in regression tests, as it'd cause output
+			 * differences depending on build options.  Might want to separate
+			 * that out from COSTS at a later stage.
+			 */
+			if (es->costs)
+				ExplainPrintJITSummary(es, queryDesc);
+		}
+
+		/*
+		 * Close down the query and free resources.  Include time for this in
+		 * the total execution time (although it should be pretty minimal).
+		 */
+		INSTR_TIME_SET_CURRENT(starttime);
+
+		if (aqp_state->need_break)
+		{
+			/* ExecutorEnd_hook = AQP_standard_ExecutorEnd; */
+			ExecutorEnd(queryDesc);
+			/* ExecutorEnd_hook = NULL; */
+			FreeQueryDesc(queryDesc);
+
+			PopActiveSnapshot();
+
+			/* We need a CCI just in case query expanded to multiple plans */
+			/* 还有问题 */
+			if (es->analyze)
+				CommandCounterIncrement();
+		}
+		else
+		{
+			AQP_ExecutorEnd(queryDesc);
+		}
+
+		totaltime += elapsed_time(&starttime);
+
+		/*
+		 * We only report execution time if we actually ran the query (that
+		 * is, the user specified ANALYZE), and if summary reporting is
+		 * enabled (the user can set SUMMARY OFF to not have the timing
+		 * information included in the output).  By default, ANALYZE sets
+		 * SUMMARY to true.
+		 */
+		if (aqp_state->need_break)
+		{
+			if (es->summary && es->analyze)
+			{
+				ExplainPropertyFloat("Execution Time", "ms", 1000.0 * totaltime, 3,
+									 es);
+				ExplainPropertyInteger("AQP Loops", NULL, (int64)
+									   aqp_state->version, es);
+			}
+
+			ExplainCloseGroup("Query", NULL, true, es);
+		}
+
+		aqp_state->version++;
+	}
+	/* 开启是在query内部调用的 */
+	SetExecutorStartHook(false);
 }
 
 /*
@@ -1388,6 +1659,13 @@ ExplainNode(PlanState *planstate, List *ancestors,
 		case T_Hash:
 			pname = sname = "Hash";
 			break;
+
+            /*
+             * AQP
+             */
+        case T_MaterialAnalyze:
+            pname = sname = "MaterializeAnalyze";
+            break;
 		default:
 			pname = sname = "???";
 			break;

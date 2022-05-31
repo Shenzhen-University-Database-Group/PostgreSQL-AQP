@@ -53,6 +53,11 @@ typedef struct QueryDesc
 
 	/* This is always set NULL by the core system, but plugins can change it */
 	struct Instrumentation *totaltime;	/* total time spent in ExecutorRun */
+
+    /*
+     * AQP
+     */
+	struct AQPState *aqp_state;
 } QueryDesc;
 
 /* in pquery.c */
@@ -66,5 +71,12 @@ extern QueryDesc *CreateQueryDesc(PlannedStmt *plannedstmt,
 								  int instrument_options);
 
 extern void FreeQueryDesc(QueryDesc *qdesc);
+
+/*
+ * AQP
+ */
+extern void RedefineQueryDesc(QueryDesc *qd,
+                              PlannedStmt *plannedstmt,
+                              QueryEnvironment *queryEnv);
 
 #endif							/* EXECDESC_H  */

@@ -376,6 +376,16 @@ struct PlannerInfo
 
 	/* Does this query modify any partition key columns? */
 	bool		partColsUpdated;
+
+    /*
+     * AQP
+     */
+    int			AQP_join_cur_level;
+    struct Path *AQP_deepest_join_path;
+    /* TODO: (Zackery) These maybe have some problems */
+    struct WindowFuncLists *wflists;
+    List	   *activeWindows;
+    struct grouping_sets_data *gset_data;
 };
 
 
@@ -769,6 +779,12 @@ typedef struct RelOptInfo
 	Relids		all_partrels;	/* Relids set of all partition relids */
 	List	  **partexprs;		/* Non-nullable partition key expressions */
 	List	  **nullable_partexprs; /* Nullable partition key expressions */
+
+	/* AQP */
+	int			level;
+	int			aqp_version;
+	bool		is_listrel;
+	bool		is_aqp_baserel;
 } RelOptInfo;
 
 /*
@@ -1190,6 +1206,11 @@ typedef struct Path
 	Cost		total_cost;		/* total cost (assuming all tuples fetched) */
 
 	List	   *pathkeys;		/* sort ordering of path's output */
+
+    /*
+     * AQP
+     */
+	int			manode_num;
 	/* pathkeys is a List of PathKey nodes; see above */
 } Path;
 
@@ -1366,6 +1387,15 @@ typedef struct TidRangePath
 } TidRangePath;
 
 /*
+ * AQP
+ */
+typedef struct SubPath
+{
+	Path		path;
+	Path	   *subpath;		/* path representing subquery execution */
+}			SubPath;
+
+/*
  * SubqueryScanPath represents a scan of an unflattened subquery-in-FROM
  *
  * Note that the subpath comes from a different planning domain; for example
@@ -1485,6 +1515,16 @@ typedef struct GroupResultPath
 	Path		path;
 	List	   *quals;
 } GroupResultPath;
+
+/*
+ * AQP
+ */
+typedef struct MaterialAnalyzePath
+{
+	Path		path;
+	Path	   *subpath;		/* path representing subquery execution */
+}			MaterialAnalyzePath;
+
 
 /*
  * MaterialPath represents use of a Material plan node, i.e., caching of

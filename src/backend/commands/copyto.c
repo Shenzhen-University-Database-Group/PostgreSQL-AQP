@@ -502,8 +502,11 @@ BeginCopyTo(ParseState *pstate,
 		}
 
 		/* plan the query */
+        /*
+         * AQP
+         */
 		plan = pg_plan_query(query, pstate->p_sourcetext,
-							 CURSOR_OPT_PARALLEL_OK, NULL);
+							 CURSOR_OPT_PARALLEL_OK, NULL, NULL);
 
 		/*
 		 * With row-level security and a user using "COPY relation TO", we

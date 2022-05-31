@@ -101,6 +101,12 @@ static char *ExecBuildSlotValueDescription(Oid reloid,
 										   int maxfieldlen);
 static void EvalPlanQualStart(EPQState *epqstate, Plan *planTree);
 
+/*
+ * AQP
+ */
+static void AQP_InitPlan(QueryDesc *queryDesc, int eflags);
+static void AQP_ExecEndPlan(PlanState *planstate, EState *estate);
+
 /* end of local decls */
 
 
@@ -141,6 +147,151 @@ ExecutorStart(QueryDesc *queryDesc, int eflags)
 		(*ExecutorStart_hook) (queryDesc, eflags);
 	else
 		standard_ExecutorStart(queryDesc, eflags);
+}
+
+/*
+ * AQP - FUNCTION
+ */
+void
+AQP_standard_ExecutorStart(QueryDesc *queryDesc, int eflags)
+{
+	if (queryDesc->aqp_state == NULL)
+		return standard_ExecutorStart(queryDesc, eflags);
+
+	EState	   *estate;
+	MemoryContext oldcontext;
+
+	/* sanity checks: queryDesc must not be started already */
+	Assert(queryDesc != NULL);
+	Assert(queryDesc->aqp_state != NULL);
+	if (queryDesc->aqp_state->version == 1)
+		Assert(queryDesc->estate == NULL);
+
+	/*
+	 * If the transaction is read-only, we need to check if any writes are
+	 * planned to non-temporary tables.  EXPLAIN is considered read-only.
+	 *
+	 * Don't allow writes in parallel mode.  Supporting UPDATE and DELETE
+	 * would require (a) storing the combo CID hash in shared memory, rather
+	 * than synchronizing it just once at the start of parallelism, and (b) an
+	 * alternative to heap_update()'s reliance on xmax for mutual exclusion.
+	 * INSERT may have no such troubles, but we forbid it to simplify the
+	 * checks.
+	 *
+	 * We have lower-level defenses in CommandCounterIncrement and elsewhere
+	 * against performing unsafe operations in parallel mode, but this gives a
+	 * more user-friendly error message.
+	 */
+	if ((XactReadOnly || IsInParallelMode()) &&
+		!(eflags & EXEC_FLAG_EXPLAIN_ONLY))
+		ExecCheckXactReadOnly(queryDesc->plannedstmt);
+
+	/*
+	 * Build EState, switch into per-query memory context for startup.
+	 */
+	/* 这里可以控制内存 */
+	if (queryDesc->aqp_state->version == 1)
+	{
+		estate = CreateExecutorState();
+		queryDesc->estate = estate;
+	}
+	else
+	{
+		estate = queryDesc->estate;
+	}
+
+	oldcontext = MemoryContextSwitchTo(estate->es_query_cxt);
+
+	/*
+	 * Fill in external parameters, if any, from queryDesc; and allocate
+	 * workspace for internal parameters
+	 */
+	estate->es_param_list_info = queryDesc->params;
+
+	/*
+	 * 这个得让他palloc，因为每次得plannedstmt得param可能不一样
+	 */
+	if (queryDesc->plannedstmt->paramExecTypes != NIL)
+	{
+		int			nParamExec;
+
+		nParamExec = list_length(queryDesc->plannedstmt->paramExecTypes);
+		estate->es_param_exec_vals = (ParamExecData *)
+			palloc0(nParamExec * sizeof(ParamExecData));
+	}
+
+	/* We now require all callers to provide sourceText */
+	Assert(queryDesc->sourceText != NULL);
+	estate->es_sourceText = queryDesc->sourceText;
+
+	/*
+	 * Fill in the query environment, if any, from queryDesc.
+	 */
+	estate->es_queryEnv = queryDesc->queryEnv;
+
+	/*
+	 * If non-read-only query, set the command ID to mark output tuples with
+	 */
+	switch (queryDesc->operation)
+	{
+		case CMD_SELECT:
+
+			/*
+			 * SELECT FOR [KEY] UPDATE/SHARE and modifying CTEs need to mark
+			 * tuples
+			 */
+			if (queryDesc->plannedstmt->rowMarks != NIL ||
+				queryDesc->plannedstmt->hasModifyingCTE)
+				estate->es_output_cid = GetCurrentCommandId(true);
+
+			/*
+			 * A SELECT without modifying CTEs can't possibly queue triggers,
+			 * so force skip-triggers mode. This is just a marginal efficiency
+			 * hack, since AfterTriggerBeginQuery/AfterTriggerEndQuery aren't
+			 * all that expensive, but we might as well do it.
+			 */
+			if (!queryDesc->plannedstmt->hasModifyingCTE)
+				eflags |= EXEC_FLAG_SKIP_TRIGGERS;
+			break;
+
+		case CMD_INSERT:
+		case CMD_DELETE:
+		case CMD_UPDATE:
+			estate->es_output_cid = GetCurrentCommandId(true);
+			break;
+
+		default:
+			elog(ERROR, "unrecognized operation code: %d",
+				 (int) queryDesc->operation);
+			break;
+	}
+
+	/*
+	 * Copy other important information into the EState
+	 */
+	if (queryDesc->aqp_state->version == 1)
+	{
+		estate->es_snapshot = RegisterSnapshot(queryDesc->snapshot);
+		estate->es_crosscheck_snapshot = RegisterSnapshot(queryDesc->crosscheck_snapshot);
+		estate->es_top_eflags = eflags;
+		estate->es_instrument = queryDesc->instrument_options;
+	}
+
+	estate->es_jit_flags = queryDesc->plannedstmt->jitFlags;
+
+	/*
+	 * Set up an AFTER-trigger statement context, unless told not to, or
+	 * unless it's EXPLAIN-only mode (when ExecutorFinish won't be called).
+     */
+    if (!(eflags & (EXEC_FLAG_SKIP_TRIGGERS | EXEC_FLAG_EXPLAIN_ONLY)))
+    AfterTriggerBeginQuery();
+
+	/*
+	 * Initialize the plan state tree
+	 */
+	AQP_InitPlan(queryDesc, eflags);
+
+	MemoryContextSwitchTo(oldcontext);
 }
 
 void
@@ -464,6 +615,94 @@ ExecutorEnd(QueryDesc *queryDesc)
 		standard_ExecutorEnd(queryDesc);
 }
 
+/*
+ * AQP - FUNCTION
+ *
+ * In order to close relations which are opened in each time loop.
+ *
+ * PS: In the future, this function maybe can close all relations in the last loop.
+ */
+void
+AQP_ExecutorEnd(QueryDesc *queryDesc)
+{
+	EState	   *estate;
+	MemoryContext oldcontext;
+
+	/* sanity checks */
+	Assert(queryDesc != NULL);
+
+	estate = queryDesc->estate;
+
+	Assert(estate != NULL);
+
+	/* TODO: (Zackery) Add a assert for checking estate state, like the next code*/
+    /* Assert(estate->es_finished || (estate->es_top_eflags & EXEC_FLAG_EXPLAIN_ONLY)) */
+
+	/*
+	 * Switch into per-query memory context to run ExecEndPlan
+	 */
+	oldcontext = MemoryContextSwitchTo(estate->es_query_cxt);
+
+	ExecCloseResultRelations(estate);
+	ExecCloseRangeTableRelations(estate);
+
+	/*
+	 * Must switch out of context before destroying it
+	 */
+    MemoryContextSwitchTo(oldcontext);
+}
+
+void
+AQP_standard_ExecutorEnd(QueryDesc *queryDesc)
+{
+	EState	   *estate;
+	MemoryContext oldcontext;
+
+	/* sanity checks */
+	Assert(queryDesc != NULL);
+
+	estate = queryDesc->estate;
+
+	Assert(estate != NULL);
+
+	/*
+	 * Check that ExecutorFinish was called, unless in EXPLAIN-only mode. This
+	 * Assert is needed because ExecutorFinish is new as of 9.1, and callers
+	 * might forget to call it.
+	 */
+	Assert(estate->es_finished ||
+		   (estate->es_top_eflags & EXEC_FLAG_EXPLAIN_ONLY));
+
+	/*
+	 * Switch into per-query memory context to run ExecEndPlan
+	 */
+	oldcontext = MemoryContextSwitchTo(estate->es_query_cxt);
+
+	AQP_ExecEndPlan(queryDesc->planstate, estate);
+
+	/* do away with our snapshots */
+	UnregisterSnapshot(estate->es_snapshot);
+	UnregisterSnapshot(estate->es_crosscheck_snapshot);
+
+	/*
+	 * Must switch out of context before destroying it
+	 */
+	MemoryContextSwitchTo(oldcontext);
+
+	/*
+	 * Release EState and per-query memory context.  This should release
+	 * everything the executor has allocated.
+	 */
+	FreeExecutorState(estate);
+
+	/* Reset queryDesc fields that no longer point to anything */
+	queryDesc->tupDesc = NULL;
+	queryDesc->estate = NULL;
+	queryDesc->planstate = NULL;
+	queryDesc->totaltime = NULL;
+	queryDesc->aqp_state = NULL;
+}
+
 void
 standard_ExecutorEnd(QueryDesc *queryDesc)
 {
@@ -512,6 +751,12 @@ standard_ExecutorEnd(QueryDesc *queryDesc)
 	queryDesc->estate = NULL;
 	queryDesc->planstate = NULL;
 	queryDesc->totaltime = NULL;
+
+    /* TODO: (Zackery) Create a new function for aqp */
+    /*
+     * AQP
+     */
+	queryDesc->aqp_state = NULL;
 }
 
 /* ----------------------------------------------------------------
@@ -979,6 +1224,196 @@ InitPlan(QueryDesc *queryDesc, int eflags)
 	queryDesc->planstate = planstate;
 }
 
+static void
+AQP_InitPlan(QueryDesc *queryDesc, int eflags)
+{
+    CmdType		operation = queryDesc->operation;
+    PlannedStmt *plannedstmt = queryDesc->plannedstmt;
+    Plan	   *plan = plannedstmt->planTree;
+    List	   *rangeTable = plannedstmt->rtable;
+    EState	   *estate = queryDesc->estate;
+    PlanState  *planstate;
+    TupleDesc	tupType;
+    ListCell   *l;
+    int			i;
+
+    /*
+     * Do permissions checks
+     */
+    ExecCheckRTPerms(rangeTable, true);
+
+    /*
+     * initialize the node's execution state
+     */
+
+    /*
+     * TODO: (Zackery) Support to init only fro the first time
+     * In Lateral, if init only for the first time,
+     * there will be a bug, but if not, some relation will be skipped
+     */
+    ExecInitRangeTable(estate, rangeTable);
+
+    estate->es_plannedstmt = plannedstmt;
+
+    /*
+     * Next, build the ExecRowMark array from the PlanRowMark(s), if any.
+     */
+    if (plannedstmt->rowMarks)
+    {
+        estate->es_rowmarks = (ExecRowMark **)
+                palloc0(estate->es_range_table_size * sizeof(ExecRowMark *));
+        foreach(l, plannedstmt->rowMarks)
+        {
+            PlanRowMark *rc = (PlanRowMark *) lfirst(l);
+            Oid			relid;
+            Relation	relation;
+            ExecRowMark *erm;
+
+            /* ignore "parent" rowmarks; they are irrelevant at runtime */
+            if (rc->isParent)
+                continue;
+
+            /* get relation's OID (will produce InvalidOid if subquery) */
+            relid = exec_rt_fetch(rc->rti, estate)->relid;
+
+            /* open relation, if we need to access it for this mark type */
+            switch (rc->markType)
+            {
+                case ROW_MARK_EXCLUSIVE:
+                case ROW_MARK_NOKEYEXCLUSIVE:
+                case ROW_MARK_SHARE:
+                case ROW_MARK_KEYSHARE:
+                case ROW_MARK_REFERENCE:
+                    relation = ExecGetRangeTableRelation(estate, rc->rti);
+                    break;
+                case ROW_MARK_COPY:
+                    /* no physical table access is required */
+                    relation = NULL;
+                    break;
+                default:
+                    elog(ERROR, "unrecognized markType: %d", rc->markType);
+                    relation = NULL;	/* keep compiler quiet */
+                    break;
+            }
+
+            /* Check that relation is a legal target for marking */
+            if (relation)
+                CheckValidRowMarkRel(relation, rc->markType);
+
+            erm = (ExecRowMark *) palloc(sizeof(ExecRowMark));
+            erm->relation = relation;
+            erm->relid = relid;
+            erm->rti = rc->rti;
+            erm->prti = rc->prti;
+            erm->rowmarkId = rc->rowmarkId;
+            erm->markType = rc->markType;
+            erm->strength = rc->strength;
+            erm->waitPolicy = rc->waitPolicy;
+            erm->ermActive = false;
+            ItemPointerSetInvalid(&(erm->curCtid));
+            erm->ermExtra = NULL;
+
+            Assert(erm->rti > 0 && erm->rti <= estate->es_range_table_size &&
+                   estate->es_rowmarks[erm->rti - 1] == NULL);
+
+            estate->es_rowmarks[erm->rti - 1] = erm;
+        }
+    }
+
+    /*
+     * Initialize the executor's tuple table to empty.
+     */
+    if (queryDesc->aqp_state->version == 1)
+        estate->es_tupleTable = NIL;
+
+    /* signal that this EState is not used for EPQ */
+    if (queryDesc->aqp_state->version == 1)
+        estate->es_epq_active = NULL;
+
+    /*
+     * Initialize private state information for each SubPlan.  We must do this
+     * before running ExecInitNode on the main query tree, since
+     * ExecInitSubPlan expects to be able to find these entries.
+     */
+    /* TODO: (Zackery) This may has some problems */
+    if (queryDesc->aqp_state->version == 1)
+        Assert(estate->es_subplanstates == NIL);
+    i = 1;						/* subplan indices count from 1 */
+    foreach(l, plannedstmt->subplans)
+    {
+        Plan	   *subplan = (Plan *) lfirst(l);
+        PlanState  *subplanstate;
+        int			sp_eflags;
+
+        /*
+         * A subplan will never need to do BACKWARD scan nor MARK/RESTORE. If
+         * it is a parameterless subplan (not initplan), we suggest that it be
+         * prepared to handle REWIND efficiently; otherwise there is no need.
+         */
+        sp_eflags = eflags
+                    & (EXEC_FLAG_EXPLAIN_ONLY | EXEC_FLAG_WITH_NO_DATA);
+        if (bms_is_member(i, plannedstmt->rewindPlanIDs))
+            sp_eflags |= EXEC_FLAG_REWIND;
+
+        subplanstate = ExecInitNode(subplan, estate, sp_eflags);
+
+        estate->es_subplanstates = lappend(estate->es_subplanstates,
+                                           subplanstate);
+
+        i++;
+    }
+
+    /*
+     * Initialize the private state information for all the nodes in the query
+     * tree.  This opens files, allocates storage and leaves us ready to start
+     * processing tuples.
+     */
+    planstate = ExecInitNode(plan, estate, eflags);
+
+    /*
+     * Get the tuple descriptor describing the type of tuples to return.
+     */
+    tupType = ExecGetResultType(planstate);
+
+    /*
+     * Initialize the junk filter if needed.  SELECT queries need a filter if
+     * there are any junk attrs in the top-level tlist.
+     */
+    if (operation == CMD_SELECT)
+    {
+        bool		junk_filter_needed = false;
+        ListCell   *tlist;
+
+        foreach(tlist, plan->targetlist)
+        {
+            TargetEntry *tle = (TargetEntry *) lfirst(tlist);
+
+            if (tle->resjunk)
+            {
+                junk_filter_needed = true;
+                break;
+            }
+        }
+
+        if (junk_filter_needed)
+        {
+            JunkFilter *j;
+            TupleTableSlot *slot;
+
+            slot = ExecInitExtraTupleSlot(estate, NULL, &TTSOpsVirtual);
+            j = ExecInitJunkFilter(planstate->plan->targetlist,
+                                   slot);
+            estate->es_junkFilter = j;
+
+            /* Want to return the cleaned tuple type */
+            tupType = j->jf_cleanTupType;
+        }
+    }
+
+    queryDesc->tupDesc = tupType;
+    queryDesc->planstate = planstate;
+}
+
 /*
  * Check that a proposed result relation is a legal target for the operation
  *
@@ -1396,6 +1831,46 @@ ExecPostprocessPlan(EState *estate)
  * tuple tables must be cleared or dropped to ensure pins are released.
  * ----------------------------------------------------------------
  */
+
+/*
+ * AQP - FUNCTION
+ */
+static void
+AQP_ExecEndPlan(PlanState *planstate, EState *estate)
+{
+	ListCell   *l;
+
+	/*
+	 * shut down the node-type-specific query processing
+	 */
+	ExecEndNode(planstate);
+
+	/*
+	 * for subplans too
+	 */
+	foreach(l, estate->es_subplanstates)
+	{
+		PlanState  *subplanstate = (PlanState *) lfirst(l);
+
+		ExecEndNode(subplanstate);
+	}
+
+	/*
+	 * destroy the executor's tuple table.  Actually we only care about
+	 * releasing buffer pins and tupdesc refcounts; there's no need to pfree
+	 * the TupleTableSlots, since the containing memory context is about to go
+	 * away anyway.
+	 */
+	ExecResetTupleTable(estate->es_tupleTable, false);
+
+	/*
+	 * Close any Relations that have been opened for range table entries or
+	 * result relations.
+	 */
+	ExecCloseResultRelations(estate);
+	ExecCloseRangeTableRelations(estate);
+}
+
 static void
 ExecEndPlan(PlanState *planstate, EState *estate)
 {
@@ -1605,10 +2080,18 @@ ExecutePlan(EState *estate,
 	 * If we know we won't need to back up, we can release resources at this
 	 * point.
 	 */
-	if (!(estate->es_top_eflags & EXEC_FLAG_BACKWARD))
+    /*
+     * AQP
+     */
+	/* TODO: (Zackery) It feels like a problem, it's better to use end */
+	if (!(estate->es_top_eflags & EXEC_FLAG_BACKWARD) && estate->all_ma_state == NULL)
 		(void) ExecShutdownNode(planstate);
 
-	if (use_parallel_mode)
+    /*
+     * AQP
+     */
+    /* TODO: (Zackery) It feels like a problem, it's better to use end */
+	if (use_parallel_mode && estate->all_ma_state == NULL)
 		ExitParallelMode();
 }
 

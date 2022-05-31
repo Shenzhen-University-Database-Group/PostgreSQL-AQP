@@ -42,6 +42,10 @@ struct RangeTblEntry;			/* avoid including parsenodes.h here */
 struct ExprEvalStep;			/* avoid including execExpr.h everywhere */
 struct CopyMultiInsertBuffer;
 
+/*
+ * AQP
+ */
+struct MaterialAnalyzeState;
 
 /* ----------------
  *		ExprState node
@@ -645,6 +649,11 @@ typedef struct EState
 	int			es_jit_flags;
 	struct JitContext *es_jit;
 	struct JitInstrumentation *es_jit_worker_instr;
+
+	/*
+	 * AQP
+	 */
+	List	   *all_ma_state;
 } EState;
 
 
@@ -2045,6 +2054,19 @@ typedef struct MaterialState
 	bool		eof_underlying; /* reached end of underlying plan? */
 	Tuplestorestate *tuplestorestate;
 } MaterialState;
+
+/*
+ * AQP
+ */
+typedef struct MaterialAnalyzeState
+{
+	ScanState	ss;				/* its first field is NodeTag */
+	int			eflags;			/* capability flags to pass to tuplestore */
+	bool		eof_underlying; /* reached end of underlying plan? */
+	Tuplestorestate *tuplestorestate;
+	int			rows;
+	int			version;
+}			MaterialAnalyzeState;
 
 struct MemoizeEntry;
 struct MemoizeTuple;

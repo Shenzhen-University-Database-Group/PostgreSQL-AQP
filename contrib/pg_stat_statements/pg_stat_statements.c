@@ -909,8 +909,11 @@ pgss_planner(Query *parse,
 				result = prev_planner_hook(parse, query_string, cursorOptions,
 										   boundParams);
 			else
+                /*
+                 * AQP
+                 */
 				result = standard_planner(parse, query_string, cursorOptions,
-										  boundParams);
+										  boundParams, NULL);
 		}
 		PG_FINALLY();
 		{
@@ -946,8 +949,11 @@ pgss_planner(Query *parse,
 			result = prev_planner_hook(parse, query_string, cursorOptions,
 									   boundParams);
 		else
+            /*
+             * AQP
+             */
 			result = standard_planner(parse, query_string, cursorOptions,
-									  boundParams);
+									  boundParams, NULL);
 	}
 
 	return result;

@@ -27,6 +27,11 @@
 #include "utils/memutils.h"
 #include "utils/snapmgr.h"
 
+/*
+ * AQP
+ */
+#include <utils/backend_status.h>
+
 
 /*
  * ActivePortal is the currently executing Portal (the most closely nested,
@@ -59,6 +64,29 @@ static uint64 DoPortalRunFetch(Portal portal,
 							   DestReceiver *dest);
 static void DoPortalRewind(Portal portal);
 
+/*
+ * AQP - FUNCTION
+ *
+ * RedefineQueryDesc
+ */
+void
+RedefineQueryDesc(QueryDesc *qd,
+				  PlannedStmt *plannedstmt,
+				  QueryEnvironment *queryEnv)
+{
+	qd->operation = plannedstmt->commandType;	/* operation */
+	qd->plannedstmt = plannedstmt;	/* plan */
+	/* RI check snapshot */
+	qd->queryEnv = queryEnv;
+
+	/* null these fields until set by ExecutorStart */
+	qd->planstate = NULL;
+
+	/* not yet executed */
+	qd->already_executed = false;
+
+	Assert(qd->totaltime == NULL);
+}
 
 /*
  * CreateQueryDesc
@@ -94,6 +122,11 @@ CreateQueryDesc(PlannedStmt *plannedstmt,
 
 	/* not yet executed */
 	qd->already_executed = false;
+
+    /*
+     * AQP
+     */
+	qd->aqp_state = NULL;
 
 	return qd;
 }
@@ -401,6 +434,186 @@ FetchStatementTargetList(Node *stmt)
 		return FetchPreparedStatementTargetList(entry);
 	}
 	return NIL;
+}
+
+/*
+ * AQP_PortalStart
+ *		This function is the aqp version of PortalStart
+ */
+void
+AQP_PortalStart(Portal portal, ParamListInfo params,
+                int eflags, Snapshot snapshot, AQPState * aqp_state)
+{
+    Portal		saveActivePortal;
+    ResourceOwner saveResourceOwner;
+    MemoryContext savePortalContext;
+    MemoryContext oldContext;
+    QueryDesc  *queryDesc;
+    int			myeflags;
+
+    AssertArg(PortalIsValid(portal));
+
+    /*
+     * TODO: (Zackery) Support a new assert
+     * AssertState(portal->status == PORTAL_DEFINED || portal->status ==
+     * PORTAL_READY);
+     */
+
+    /*
+     * Set up global portal context pointers.
+     */
+    saveActivePortal = ActivePortal;
+    saveResourceOwner = CurrentResourceOwner;
+    savePortalContext = PortalContext;
+
+    /* TODO: (Zackery) Support dynamically allocate memory for materialanalyze */
+
+    PG_TRY();
+            {
+                ActivePortal = portal;
+                if (portal->resowner)
+                    CurrentResourceOwner = portal->resowner;
+                PortalContext = portal->portalContext;
+
+                oldContext = MemoryContextSwitchTo(PortalContext);
+
+                if (aqp_state->version == 1)
+                {
+                    /* Must remember portal param list, if any */
+                    portal->portalParams = params;
+
+                    /*
+                     * Determine the portal execution strategy
+                     */
+                    portal->strategy = ChoosePortalStrategy(portal->stmts);
+                }
+
+                /*
+                 * Fire her up according to the strategy
+                 */
+                switch (portal->strategy)
+                {
+                    case PORTAL_ONE_SELECT:
+
+                        if (aqp_state->version == 1)
+                        {
+                            /* Must set snapshot before starting executor. */
+                            if (snapshot)
+                                PushActiveSnapshot(snapshot);
+                            else
+                                PushActiveSnapshot(GetTransactionSnapshot());
+                        }
+
+                        /*
+                         * We could remember the snapshot in portal->portalSnapshot,
+                         * but presently there seems no need to, as this code path
+                         * cannot be used for non-atomic execution.  Hence there can't
+                         * be any commit/abort that might destroy the snapshot.  Since
+                         * we don't do that, there's also no need to force a
+                         * non-default nesting level for the snapshot.
+                         */
+
+                        /*
+                         * Create QueryDesc in portal's context; for the moment, set
+                         * the destination to DestNone.
+                         */
+                        if (aqp_state->version == 1)
+                        {
+                            queryDesc = CreateQueryDesc(linitial_node(PlannedStmt, portal->stmts),
+                                                        portal->sourceText,
+                                                        GetActiveSnapshot(),
+                                                        InvalidSnapshot,
+                                                        None_Receiver,
+                                                        params,
+                                                        portal->queryEnv,
+                                                        0);
+                            queryDesc->aqp_state = aqp_state;
+                        }
+                        else
+                        {
+                            queryDesc = portal->queryDesc;
+                            RedefineQueryDesc(queryDesc, linitial_node(PlannedStmt, portal->stmts),
+                                              portal->queryEnv);
+                        }
+
+
+                        /*
+                         * If it's a scrollable cursor, executor needs to support
+                         * REWIND and backwards scan, as well as whatever the caller
+                         * might've asked for.
+                         */
+                        if (portal->cursorOptions & CURSOR_OPT_SCROLL)
+                            myeflags = eflags | EXEC_FLAG_REWIND | EXEC_FLAG_BACKWARD;
+                        else
+                            myeflags = eflags;
+
+                        /* 检查一下，必须不为NULL */
+                        Assert(queryDesc->aqp_state != NULL);
+
+                        /*
+                         * Call ExecutorStart to prepare the plan for execution
+                         */
+                        pgstat_report_query_id(queryDesc->plannedstmt->queryId, false);
+                        AQP_standard_ExecutorStart(queryDesc, myeflags);
+
+                        /*
+                         * This tells PortalCleanup to shut down the executor
+                         */
+                        portal->queryDesc = queryDesc;
+
+                        /*
+                         * Remember tuple descriptor (computed by ExecutorStart)
+                         */
+                        portal->tupDesc = queryDesc->tupDesc;
+
+                        /*
+                         * Reset cursor position data to "start of query"
+                         */
+                        portal->atStart = true;
+                        portal->atEnd = false;	/* allow fetches */
+                        portal->portalPos = 0;
+
+                        if (aqp_state->version == 1)
+                        {
+                            aqp_state->estate = queryDesc->estate;
+                        }
+
+                        if (aqp_state->need_break)
+                        {
+                            PopActiveSnapshot();
+                        }
+                        break;
+
+                    case PORTAL_ONE_RETURNING:
+                    case PORTAL_ONE_MOD_WITH:
+                    case PORTAL_UTIL_SELECT:
+                    case PORTAL_MULTI_QUERY:
+                        elog(ERROR, "(aqp) the portal execution strategy can't be: %d",
+                             (int) portal->strategy);
+                        break;
+                }
+            }
+        PG_CATCH();
+            {
+                /* Uncaught error while executing portal: mark it dead */
+                MarkPortalFailed(portal);
+
+                /* Restore global vars and propagate error */
+                ActivePortal = saveActivePortal;
+                CurrentResourceOwner = saveResourceOwner;
+                PortalContext = savePortalContext;
+
+                PG_RE_THROW();
+            }
+    PG_END_TRY();
+
+    MemoryContextSwitchTo(oldContext);
+
+    ActivePortal = saveActivePortal;
+    CurrentResourceOwner = saveResourceOwner;
+    PortalContext = savePortalContext;
+
+    portal->status = PORTAL_READY;
 }
 
 /*

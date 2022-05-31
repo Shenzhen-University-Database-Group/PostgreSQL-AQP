@@ -231,6 +231,13 @@ extern void EvalPlanQualBegin(EPQState *epqstate);
 extern void EvalPlanQualEnd(EPQState *epqstate);
 
 /*
+ * AQP
+ */
+extern void AQP_standard_ExecutorStart(QueryDesc *queryDesc, int eflags);
+extern void AQP_ExecutorEnd(QueryDesc *queryDesc);
+extern void AQP_standard_ExecutorEnd(QueryDesc *queryDesc);
+
+/*
  * functions in execProcnode.c
  */
 extern PlanState *ExecInitNode(Plan *node, EState *estate, int eflags);

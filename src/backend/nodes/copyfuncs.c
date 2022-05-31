@@ -933,6 +933,26 @@ _copyHashJoin(const HashJoin *from)
 
 
 /*
+ * AQP - FUNCTION
+ *
+ * _copyMaterialAnalyze
+ */
+static MaterialAnalyze *
+_copyMaterialAnalyze(const MaterialAnalyze * from)
+{
+	MaterialAnalyze *newnode = makeNode(MaterialAnalyze);
+
+	/*
+	 * copy node superclass fields
+	 */
+	CopyPlanFields((const Plan *) from, (Plan *) newnode);
+
+	COPY_SCALAR_FIELD(version);
+
+	return newnode;
+}
+
+/*
  * _copyMaterial
  */
 static Material *
@@ -5874,6 +5894,13 @@ copyObjectImpl(const void *from)
 		case T_ForeignKeyCacheInfo:
 			retval = _copyForeignKeyCacheInfo(from);
 			break;
+
+            /*
+             * AQP NODES
+             */
+        case T_MaterialAnalyze:
+            retval = _copyMaterialAnalyze(from);
+            break;
 
 		default:
 			elog(ERROR, "unrecognized node type: %d", (int) nodeTag(from));

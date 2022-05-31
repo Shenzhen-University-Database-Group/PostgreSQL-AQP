@@ -159,6 +159,11 @@ CreateExecutorState(void)
 	estate->es_jit_flags = 0;
 	estate->es_jit = NULL;
 
+    /*
+     * AQP
+     */
+	estate->all_ma_state = NULL;
+
 	/*
 	 * Return the executor state structure
 	 */

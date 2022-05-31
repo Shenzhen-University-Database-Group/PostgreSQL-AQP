@@ -839,6 +839,19 @@ _outGroup(StringInfo str, const Group *node)
 	WRITE_OID_ARRAY(grpCollations, node->numCols);
 }
 
+/*
+ * AQP - FUNCTION
+ */
+static void
+_outMaterialAnalyze(StringInfo str, const MaterialAnalyze * node)
+{
+	WRITE_NODE_TYPE("MaterialAnalyze");
+
+	_outPlanInfo(str, (const Plan *) node);
+
+	WRITE_INT_FIELD(version);
+}
+
 static void
 _outMaterial(StringInfo str, const Material *node)
 {
@@ -4521,6 +4534,13 @@ outNode(StringInfo str, const void *obj)
 			case T_PartitionRangeDatum:
 				_outPartitionRangeDatum(str, obj);
 				break;
+
+            /*
+             * AQP
+             */
+            case T_MaterialAnalyze:
+                _outMaterialAnalyze(str, obj);
+                break;
 
 			default:
 

@@ -278,6 +278,12 @@ extern int	tcp_keepalives_interval;
 extern int	tcp_keepalives_count;
 extern int	tcp_user_timeout;
 
+/*
+ * AQP
+ */
+extern bool open_aqp;
+extern int	aqp_loops;
+
 #ifdef TRACE_SORT
 extern bool trace_sort;
 #endif

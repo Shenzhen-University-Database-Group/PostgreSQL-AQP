@@ -64,6 +64,11 @@
 #include "utils/rel.h"
 #include "utils/syscache.h"
 
+/*
+ * AQP
+ */
+#include "executor/nodeMaterialAnalyze.h"
+
 static bool IndexSupportsBackwardScan(Oid indexid);
 
 
@@ -251,6 +256,13 @@ ExecReScan(PlanState *node)
 			ExecReScanHashJoin((HashJoinState *) node);
 			break;
 
+            /*
+             * AQP
+             */
+		case T_MaterialAnalyzeState:
+			ExecReScanMaterialAnalyze((MaterialAnalyzeState *) node);
+			break;
+
 		case T_MaterialState:
 			ExecReScanMaterial((MaterialState *) node);
 			break;
@@ -341,6 +353,13 @@ ExecMarkPos(PlanState *node)
 			ExecCustomMarkPos((CustomScanState *) node);
 			break;
 
+            /*
+             * AQP
+             */
+		case T_MaterialAnalyzeState:
+			ExecMaterialAnalyzeMarkPos((MaterialAnalyzeState *) node);
+			break;
+
 		case T_MaterialState:
 			ExecMaterialMarkPos((MaterialState *) node);
 			break;
@@ -390,6 +409,13 @@ ExecRestrPos(PlanState *node)
 			ExecCustomRestrPos((CustomScanState *) node);
 			break;
 
+            /*
+             * AQP
+             */
+		case T_MaterialAnalyzeState:
+			ExecMaterialAnalyzeRestrPos((MaterialAnalyzeState *) node);
+			break;
+
 		case T_MaterialState:
 			ExecMaterialRestrPos((MaterialState *) node);
 			break;
@@ -435,6 +461,10 @@ ExecSupportsMarkRestore(Path *pathnode)
 
 		case T_Material:
 		case T_Sort:
+            /*
+             * AQP
+             */
+        case T_MaterialAnalyze:
 			return true;
 
 		case T_CustomScan:
@@ -583,6 +613,10 @@ ExecSupportsBackwardScan(Plan *node)
 		case T_CteScan:
 		case T_Material:
 		case T_Sort:
+            /*
+             * AQP
+             */
+        case T_MaterialAnalyze:
 			/* these don't evaluate tlist */
 			return true;
 
@@ -652,6 +686,10 @@ ExecMaterializesOutput(NodeTag plantype)
 		case T_NamedTuplestoreScan:
 		case T_WorkTableScan:
 		case T_Sort:
+            /*
+             * AQP
+             */
+        case T_MaterialAnalyze:
 			return true;
 
 		default:

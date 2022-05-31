@@ -119,6 +119,11 @@
 #include "miscadmin.h"
 #include "nodes/nodeFuncs.h"
 
+/*
+ * AQP
+ */
+#include "executor/nodeMaterialAnalyze.h"
+
 static TupleTableSlot *ExecProcNodeFirst(PlanState *node);
 static TupleTableSlot *ExecProcNodeInstr(PlanState *node);
 
@@ -311,6 +316,14 @@ ExecInitNode(Plan *node, EState *estate, int eflags)
 			/*
 			 * materialization nodes
 			 */
+            /*
+             * AQP
+             */
+		case T_MaterialAnalyze:
+			result = (PlanState *) ExecInitMaterialAnalyze((MaterialAnalyze *) node,
+														   estate, eflags);
+			break;
+
 		case T_Material:
 			result = (PlanState *) ExecInitMaterial((Material *) node,
 													estate, eflags);
@@ -407,8 +420,11 @@ ExecInitNode(Plan *node, EState *estate, int eflags)
 
 	/* Set up instrumentation for this node if requested */
 	if (estate->es_instrument)
-		result->instrument = InstrAlloc(1, estate->es_instrument,
-										result->async_capable);
+        /* TODO: (Zackery) Maybe it's better to create a new function for aqp */
+		/* Prevent duplication */
+		if (result->instrument == NULL)
+			result->instrument = InstrAlloc(1, estate->es_instrument,
+											result->async_capable);
 
 	return result;
 }
@@ -708,6 +724,14 @@ ExecEndNode(PlanState *node)
 			/*
 			 * materialization nodes
 			 */
+
+            /*
+             * AQP
+             */
+		case T_MaterialAnalyzeState:
+			ExecEndMaterialAnalyze((MaterialAnalyzeState *) node);
+			break;
+
 		case T_MaterialState:
 			ExecEndMaterial((MaterialState *) node);
 			break;

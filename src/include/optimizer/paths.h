@@ -62,6 +62,11 @@ extern void create_partial_bitmap_paths(PlannerInfo *root, RelOptInfo *rel,
 										Path *bitmapqual);
 extern void generate_partitionwise_join_paths(PlannerInfo *root,
 											  RelOptInfo *rel);
+/*
+ * AQP
+ */
+extern RelOptInfo *AQP_standard_join_search(PlannerInfo *root, int levels_needed,
+                                            List *initial_rels);
 
 #ifdef OPTIMIZER_DEBUG
 extern void debug_print_rel(PlannerInfo *root, RelOptInfo *rel);
@@ -109,6 +114,10 @@ extern bool have_join_order_restriction(PlannerInfo *root,
 extern bool have_dangerous_phv(PlannerInfo *root,
 							   Relids outer_relids, Relids inner_params);
 extern void mark_dummy_rel(RelOptInfo *rel);
+/*
+ * AQP
+ */
+extern void AQP_join_search_one_level(PlannerInfo *root, int level);
 
 /*
  * equivclass.c

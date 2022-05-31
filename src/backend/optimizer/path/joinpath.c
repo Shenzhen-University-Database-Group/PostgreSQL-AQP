@@ -669,9 +669,13 @@ try_nestloop_path(PlannerInfo *root,
 	initial_cost_nestloop(root, &workspace, jointype,
 						  outer_path, inner_path, extra);
 
-	if (add_path_precheck(joinrel,
-						  workspace.startup_cost, workspace.total_cost,
-						  pathkeys, required_outer))
+    /* TODO: (Zackery) Maybe can create a new function for aqp */
+	if (add_path_precheck_manode_num(inner_path, outer_path) || add_path_precheck(joinrel,
+																				  workspace.startup_cost, workspace.total_cost,
+																				  pathkeys, required_outer))
+    /* 	if (add_path_precheck(joinrel,
+ 						  workspace.startup_cost, workspace.total_cost,
+ 						  pathkeys, required_outer))*/
 	{
 		/*
 		 * If the inner path is parameterized, it is parameterized by the
@@ -864,9 +868,13 @@ try_mergejoin_path(PlannerInfo *root,
 						   outersortkeys, innersortkeys,
 						   extra);
 
-	if (add_path_precheck(joinrel,
-						  workspace.startup_cost, workspace.total_cost,
-						  pathkeys, required_outer))
+    /* TODO: (Zackery) Maybe can create a new function for aqp */
+	if (add_path_precheck_manode_num(inner_path, outer_path) || add_path_precheck(joinrel,
+																				  workspace.startup_cost, workspace.total_cost,
+																				  pathkeys, required_outer))
+    /* 	if (add_path_precheck(joinrel,
+ 						  workspace.startup_cost, workspace.total_cost,
+ 						  pathkeys, required_outer))*/
 	{
 		add_path(joinrel, (Path *)
 				 create_mergejoin_path(root,
@@ -998,9 +1006,13 @@ try_hashjoin_path(PlannerInfo *root,
 	initial_cost_hashjoin(root, &workspace, jointype, hashclauses,
 						  outer_path, inner_path, extra, false);
 
-	if (add_path_precheck(joinrel,
-						  workspace.startup_cost, workspace.total_cost,
-						  NIL, required_outer))
+    /* TODO: (Zackery) Maybe can create a new function for aqp */
+	if (add_path_precheck_manode_num(inner_path, outer_path) || add_path_precheck(joinrel,
+																				  workspace.startup_cost, workspace.total_cost,
+																				  NIL, required_outer))
+    /* 	if (add_path_precheck(joinrel,
+ 						  workspace.startup_cost, workspace.total_cost,
+ 						  NIL, required_outer))*/
 	{
 		add_path(joinrel, (Path *)
 				 create_hashjoin_path(root,

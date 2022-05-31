@@ -20,13 +20,21 @@
 
 #include "nodes/pathnodes.h"
 #include "nodes/plannodes.h"
+/*
+ * AQP
+ */
+#include "nodes/aqpstate.h"
 
 
 /* Hook for plugins to get control in planner() */
+/*
+ * AQP
+ */
 typedef PlannedStmt *(*planner_hook_type) (Query *parse,
 										   const char *query_string,
 										   int cursorOptions,
-										   ParamListInfo boundParams);
+										   ParamListInfo boundParams,
+										   AQPState * sstate);
 extern PGDLLIMPORT planner_hook_type planner_hook;
 
 /* Hook for plugins to get control when grouping_planner() plans upper rels */
@@ -37,10 +45,12 @@ typedef void (*create_upper_paths_hook_type) (PlannerInfo *root,
 											  void *extra);
 extern PGDLLIMPORT create_upper_paths_hook_type create_upper_paths_hook;
 
-
+/*
+ * AQP
+ */
 extern PlannedStmt *standard_planner(Query *parse, const char *query_string,
 									 int cursorOptions,
-									 ParamListInfo boundParams);
+									 ParamListInfo boundParams, AQPState * aqp_state);
 
 extern PlannerInfo *subquery_planner(PlannerGlobal *glob, Query *parse,
 									 PlannerInfo *parent_root,
@@ -57,5 +67,11 @@ extern Path *get_cheapest_fractional_path(RelOptInfo *rel,
 										  double tuple_fraction);
 
 extern Expr *preprocess_phv_expression(PlannerInfo *root, Expr *expr);
+
+/*
+ * AQP
+ */
+extern PlannedStmt *AQP_planner(Query *parse, const char *query_string, int cursorOptions,
+								ParamListInfo boundParams, AQPState * aqp_state);
 
 #endif							/* PLANNER_H */

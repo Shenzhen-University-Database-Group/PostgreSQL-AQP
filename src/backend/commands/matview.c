@@ -403,7 +403,10 @@ refresh_matview_datafill(DestReceiver *dest, Query *query,
 	CHECK_FOR_INTERRUPTS();
 
 	/* Plan the query which will generate data for the refresh. */
-	plan = pg_plan_query(query, queryString, CURSOR_OPT_PARALLEL_OK, NULL);
+    /*
+     * AQP
+     */
+	plan = pg_plan_query(query, queryString, CURSOR_OPT_PARALLEL_OK, NULL, NULL);
 
 	/*
 	 * Use a snapshot with an updated command ID to ensure this query sees

@@ -24,6 +24,12 @@
 
 #include "nodes/parsenodes.h"
 
+/*
+ * AQP
+ */
+#include "nodes/aqpstate.h"
+#include "nodes/plannodes.h"
+
 /* Test if an expression node represents a SRF call.  Beware multiple eval! */
 #define IS_SRF_CALL(node) \
 	((IsA(node, FuncExpr) && ((FuncExpr *) (node))->funcretset) || \
@@ -114,9 +120,12 @@ typedef enum
 extern int	force_parallel_mode;
 extern bool parallel_leader_participation;
 
+/*
+ * AQP
+ */
 extern struct PlannedStmt *planner(Query *parse, const char *query_string,
 								   int cursorOptions,
-								   struct ParamListInfoData *boundParams);
+								   struct ParamListInfoData *boundParams, AQPState * aqp_state);
 
 extern Expr *expression_planner(Expr *expr);
 extern Expr *expression_planner_with_deps(Expr *expr,

@@ -313,6 +313,13 @@ static ModifyTable *make_modifytable(PlannerInfo *root, Plan *subplan,
 static GatherMerge *create_gather_merge_plan(PlannerInfo *root,
 											 GatherMergePath *best_path);
 
+/*
+ * AQP
+ */
+static MaterialAnalyze * create_materialanalyze_plan(PlannerInfo *root, MaterialAnalyzePath * best_path,
+                                                     int flags);
+static MaterialAnalyze * make_materialanalyze(Plan *lefttree);
+
 
 /*
  * create_plan
@@ -351,7 +358,10 @@ create_plan(PlannerInfo *root, Path *best_path)
 	 * top-level tlist seen at execution time.  However, ModifyTable plan
 	 * nodes don't have a tlist matching the querytree targetlist.
 	 */
-	if (!IsA(plan, ModifyTable))
+    /*
+     * AQP
+     */
+	if (!IsA(plan, ModifyTable) && !IsA(plan, MaterialAnalyze))
 		apply_tlist_labeling(plan->targetlist, root->processed_tlist);
 
 	/*
@@ -452,6 +462,16 @@ create_plan_recurse(PlannerInfo *root, Path *best_path, int flags)
 			plan = (Plan *) create_project_set_plan(root,
 													(ProjectSetPath *) best_path);
 			break;
+
+        /*
+         * AQP
+         */
+		case T_MaterialAnalyze:
+			plan = (Plan *) create_materialanalyze_plan(root,
+														(MaterialAnalyzePath *) best_path,
+														flags);
+			break;
+
 		case T_Material:
 			plan = (Plan *) create_material_plan(root,
 												 (MaterialPath *) best_path,
@@ -1545,6 +1565,40 @@ create_project_set_plan(PlannerInfo *root, ProjectSetPath *best_path)
 	copy_generic_path_info(&plan->plan, (Path *) best_path);
 
 	return plan;
+}
+
+/*
+ * AQP - FUNCTION
+ *
+ * create_materialanalyze_plan
+ *	  Create a MaterialAnalyze plan for 'best_path' and (recursively) plans
+ *	  for its subpaths.
+ *
+ *	  Returns a Plan node.
+ */
+static MaterialAnalyze *
+create_materialanalyze_plan(PlannerInfo *root, MaterialAnalyzePath * best_path, int flags)
+{
+    MaterialAnalyze *plan;
+    Plan	   *subplan;
+
+    /*
+     * We don't want any excess columns in the materialized tuples, so request
+     * a smaller tlist.  Otherwise, since Material doesn't project, tlist
+     * requirements pass through.
+     */
+    subplan = create_plan_recurse(root, best_path->subpath,
+                                  flags | CP_SMALL_TLIST);
+
+    plan = make_materialanalyze(subplan);
+
+    copy_generic_path_info(&plan->plan, (Path *) best_path);
+
+    /* 这里不能用parent的version，不对可以用，因为已经让它不改了 */
+    plan->version = best_path->path.parent->aqp_version;
+    /* plan->version = best_path->path.manode_num; */
+
+    return plan;
 }
 
 /*
@@ -6363,6 +6417,23 @@ make_sort_from_groupcols(List *groupcls,
 					 collations, nullsFirst);
 }
 
+/*
+ * AQP - FUNCTION
+ */
+static MaterialAnalyze *
+make_materialanalyze(Plan *lefttree)
+{
+	MaterialAnalyze *node = makeNode(MaterialAnalyze);
+	Plan	   *plan = &node->plan;
+
+	plan->targetlist = lefttree->targetlist;
+	plan->qual = NIL;
+	plan->lefttree = lefttree;
+	plan->righttree = NULL;
+
+	return node;
+}
+
 static Material *
 make_material(Plan *lefttree)
 {
@@ -7050,6 +7121,10 @@ is_projection_capable_path(Path *path)
 		case T_ModifyTable:
 		case T_MergeAppend:
 		case T_RecursiveUnion:
+            /*
+             * AQP NODES
+             */
+        case T_MaterialAnalyze:
 			return false;
 		case T_Append:
 
@@ -7096,6 +7171,10 @@ is_projection_capable_plan(Plan *plan)
 		case T_Append:
 		case T_MergeAppend:
 		case T_RecursiveUnion:
+            /*
+             * AQP NODES
+             */
+        case T_MaterialAnalyze:
 			return false;
 		case T_ProjectSet:
 

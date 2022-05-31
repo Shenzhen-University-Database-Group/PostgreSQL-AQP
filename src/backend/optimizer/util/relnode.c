@@ -259,6 +259,14 @@ build_simple_rel(PlannerInfo *root, int relid, RelOptInfo *parent)
 	rel->partexprs = NULL;
 	rel->nullable_partexprs = NULL;
 
+    /*
+     * AQP
+     */
+	rel->level = 1;
+	rel->aqp_version = 0;
+	rel->is_listrel = false;
+	rel->is_aqp_baserel = false;
+
 	/*
 	 * Pass assorted information down the inheritance hierarchy.
 	 */
@@ -602,6 +610,26 @@ build_join_rel(PlannerInfo *root,
 														   joinrel,
 														   outer_rel,
 														   inner_rel);
+        /*
+         * AQP
+         */
+		if (root->AQP_deepest_join_path != NULL &&
+			joinrel->aqp_version < root->AQP_deepest_join_path->parent->aqp_version &&
+			!joinrel->is_aqp_baserel)
+		{
+			/*
+			 * Set estimates of the joinrel's size.
+			 */
+			set_joinrel_size_estimates(root, joinrel, outer_rel, inner_rel,
+									   sjinfo, *restrictlist_ptr);
+			joinrel->cheapest_unique_path = NULL;
+			joinrel->cheapest_startup_path = NULL;
+			joinrel->cheapest_total_path = NULL;
+			joinrel->cheapest_parameterized_paths = NIL;
+			joinrel->pathlist = NIL;
+			joinrel->aqp_version = root->AQP_deepest_join_path->parent->aqp_version;
+		}
+
 		return joinrel;
 	}
 
@@ -672,6 +700,13 @@ build_join_rel(PlannerInfo *root,
 	joinrel->all_partrels = NULL;
 	joinrel->partexprs = NULL;
 	joinrel->nullable_partexprs = NULL;
+	/*
+	 * AQP
+	 */
+	joinrel->level = root->join_cur_level;
+	joinrel->aqp_version = 0;
+	joinrel->is_listrel = false;
+	joinrel->is_aqp_baserel = false;
 
 	/* Compute information relevant to the foreign relations. */
 	set_foreign_rel_properties(joinrel, outer_rel, inner_rel);
@@ -850,6 +885,14 @@ build_child_join_rel(PlannerInfo *root, RelOptInfo *outer_rel,
 	joinrel->all_partrels = NULL;
 	joinrel->partexprs = NULL;
 	joinrel->nullable_partexprs = NULL;
+
+    /*
+     * AQP
+     */
+	joinrel->level = root->join_cur_level;
+	joinrel->aqp_version = 0;
+	joinrel->is_listrel = false;
+	joinrel->is_aqp_baserel = false;
 
 	joinrel->top_parent_relids = bms_union(outer_rel->top_parent_relids,
 										   inner_rel->top_parent_relids);
@@ -1222,7 +1265,24 @@ fetch_upper_rel(PlannerInfo *root, UpperRelationKind kind, Relids relids)
 		upperrel = (RelOptInfo *) lfirst(lc);
 
 		if (bms_equal(upperrel->relids, relids))
+		{
+            /*
+             * AQP
+             */
+			if (root->AQP_deepest_join_path != NULL &&
+				upperrel->aqp_version < root->AQP_deepest_join_path->parent->aqp_version &&
+				!upperrel->is_aqp_baserel)
+			{
+				upperrel->cheapest_parameterized_paths = NIL;
+				upperrel->cheapest_total_path = NULL;
+				upperrel->cheapest_startup_path = NULL;
+				upperrel->cheapest_unique_path = NULL;
+				upperrel->pathlist = NIL;
+				upperrel->aqp_version = root->AQP_deepest_join_path->parent->aqp_version;
+			}
+
 			return upperrel;
+		}
 	}
 
 	upperrel = makeNode(RelOptInfo);
@@ -1239,6 +1299,13 @@ fetch_upper_rel(PlannerInfo *root, UpperRelationKind kind, Relids relids)
 	upperrel->cheapest_total_path = NULL;
 	upperrel->cheapest_unique_path = NULL;
 	upperrel->cheapest_parameterized_paths = NIL;
+	/*
+	 * AQP
+	 */
+	upperrel->level = root->join_cur_level;
+	upperrel->aqp_version = 0;
+	upperrel->is_listrel = false;
+	upperrel->is_aqp_baserel = false;
 
 	root->upper_rels[kind] = lappend(root->upper_rels[kind], upperrel);
 

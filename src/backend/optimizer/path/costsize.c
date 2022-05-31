@@ -2350,6 +2350,63 @@ cost_merge_append(Path *path, PlannerInfo *root,
 }
 
 /*
+ * AQP - FUNCTION
+ *
+ * cost_materialanalyze
+ *	  Determines and returns the cost of materializing a relation and analyze a relation, including
+ *	  the cost of reading the input data.
+ *
+ * If the total volume of data to materialize exceeds work_mem, we will need
+ * to write it to disk, so the cost is much higher in that case.
+ *
+ * Note that here we are estimating the costs for the first scan of the
+ * relation, so the materialization is all overhead --- any savings will
+ * occur only on rescan, which is estimated in cost_rescan.
+ */
+void
+cost_materialanalyze(Path *path,
+              Cost input_startup_cost, Cost input_total_cost,
+              double tuples, int width)
+{
+    Cost		startup_cost = input_startup_cost;
+    Cost		run_cost = input_total_cost - input_startup_cost;
+    double		nbytes = relation_byte_size(tuples, width);
+    long		work_mem_bytes = work_mem * 1024L;
+
+    path->rows = tuples;
+
+    /*
+     * Whether spilling or not, charge 2x cpu_operator_cost per tuple to
+     * reflect bookkeeping overhead.  (This rate must be more than what
+     * cost_rescan charges for materialize, ie, cpu_operator_cost per tuple;
+     * if it is exactly the same then there will be a cost tie between
+     * nestloop with A outer, materialized B inner and nestloop with B outer,
+     * materialized A inner.  The extra cost ensures we'll prefer
+     * materializing the smaller rel.)	Note that this is normally a good deal
+     * less than cpu_tuple_cost; which is OK because a Material plan node
+     * doesn't do qual-checking or projection, so it's got less overhead than
+     * most plan nodes.
+     */
+    run_cost += 2 * cpu_operator_cost * tuples;
+
+    /*
+     * If we will spill to disk, charge at the rate of seq_page_cost per page.
+     * This cost is assumed to be evenly spread through the plan run phase,
+     * which isn't exactly accurate but our cost model doesn't allow for
+     * nonuniform costs within the run phase.
+     */
+    if (nbytes > work_mem_bytes)
+    {
+        double		npages = ceil(nbytes / BLCKSZ);
+
+        run_cost += seq_page_cost * npages;
+    }
+
+    path->startup_cost = startup_cost;
+    path->total_cost = startup_cost + run_cost;
+}
+
+/*
  * cost_material
  *	  Determines and returns the cost of materializing a relation, including
  *	  the cost of reading the input data.
@@ -4093,6 +4150,33 @@ final_cost_hashjoin(PlannerInfo *root, HashPath *path,
 
 
 /*
+ * AQP - FUNCTION
+ *
+ * update_ma_path_cost
+ *		Update MaterialAnalyze path cost.
+ *
+ * After updating the real cost, we can generate a new plan.
+ */
+void
+update_ma_path_cost(List *all_ma_node, Path *path)
+{
+	MaterialAnalyzeState *state = (MaterialAnalyzeState *) list_nth(all_ma_node, path->parent->aqp_version - 1);
+	MaterialAnalyzePath *mpath = (MaterialAnalyzePath *) path;
+
+	/* Update RelOptInfo rows */
+    /* TODO: (zackery) not only update rows, maybe update selectivity and so on */
+	path->parent->rows = path->rows = state->rows;
+
+    /* Update path cost */
+    /* TODO: (zackery) maybe we should use cost_rescan */
+	cost_materialanalyze(path,
+				  mpath->subpath->startup_cost,
+				  mpath->subpath->total_cost,
+				  path->rows,
+				  mpath->subpath->pathtarget->width);
+}
+
+/*
  * cost_subplan
  *		Figure the costs for a SubPlan (or initplan).
  *
@@ -4257,6 +4341,11 @@ cost_rescan(PlannerInfo *root, Path *path,
 			break;
 		case T_Material:
 		case T_Sort:
+            /* TODO: (Zackery) MaterialAnalyze maybe have some problems */
+            /*
+             * AQP NODES
+             */
+        case T_MaterialAnalyze:
 			{
 				/*
 				 * These plan types not only materialize their results, but do
