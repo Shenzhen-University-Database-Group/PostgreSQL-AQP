@@ -541,14 +541,10 @@ AQP_ExplainOnePlan(Query *query,
 	DestReceiver *dest;
 	QueryDesc  *queryDesc;
 	int			eflags;
-
-	/* AQP */
 	AQPState   *aqp_state;
-
 
 	INSTR_TIME_SET_ZERO(planduration);
 
-	/* AQP */
 	aqp_state = CreateAQPState();
 
 	if (es->buffers)
@@ -571,12 +567,12 @@ AQP_ExplainOnePlan(Query *query,
 		BufferUsageAccumDiff(&bufusage, &pgBufferUsage, &bufusage_start);
 	}
 
-	/* AQP */
 	while (!aqp_state->need_break)
 	{
 		if (aqp_state->version == 1)
 			aqp_state->need_break = JudgeQuery(query, aqp_state);
-		/* 切到给物理优化准备的上下文 */
+
+		/* TODO: (Zackery) Need to consider whether to switch context */
 		/* oldcontext = MemoryContextSwitchTo(per_parsetree_context); */
 
 		INSTR_TIME_SET_CURRENT(planstart);
@@ -587,6 +583,7 @@ AQP_ExplainOnePlan(Query *query,
 
 		INSTR_TIME_ACCUM_DIFF(planduration, planend, planstart);
 
+        /* TODO: (Zackery) Need to consider whether to switch context */
 		/*
 		 * Switch back to transaction context for execution.
 		 */
@@ -644,14 +641,13 @@ AQP_ExplainOnePlan(Query *query,
 		else
 			AQP_standard_ExecutorStart(queryDesc, eflags);
 
-		/* 后续得重构 */
+		/* TODO: (Zackery) Refactoring in the future */
 		if (aqp_state->version == 1)
 		{
 			aqp_state->estate = queryDesc->estate;
 		}
 
 		/* Execute the plan for statistics if asked for */
-		/* 这里一定走的, 去掉了analyze */
 		ScanDirection dir;
 
 		/* EXPLAIN ANALYZE CREATE TABLE AS WITH NO DATA is weird */
@@ -671,7 +667,6 @@ AQP_ExplainOnePlan(Query *query,
 
 		/* We can't run ExecutorEnd 'till we're done printing the stats... */
 		totaltime += elapsed_time(&starttime);
-		/* 直到这 */
 
 		if (aqp_state->need_break)
 		{
@@ -728,15 +723,13 @@ AQP_ExplainOnePlan(Query *query,
 
 		if (aqp_state->need_break)
 		{
-			/* ExecutorEnd_hook = AQP_standard_ExecutorEnd; */
 			ExecutorEnd(queryDesc);
-			/* ExecutorEnd_hook = NULL; */
 			FreeQueryDesc(queryDesc);
 
 			PopActiveSnapshot();
 
 			/* We need a CCI just in case query expanded to multiple plans */
-			/* 还有问题 */
+			/* TODO: (Zackery) Maybe have some problems */
 			if (es->analyze)
 				CommandCounterIncrement();
 		}
@@ -769,7 +762,8 @@ AQP_ExplainOnePlan(Query *query,
 
 		aqp_state->version++;
 	}
-	/* 开启是在query内部调用的 */
+
+    /* TODO: (Zackery) Refactoring in the future */
 	SetExecutorStartHook(false);
 }
 
