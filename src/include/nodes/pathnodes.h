@@ -1523,7 +1523,7 @@ typedef struct MaterialAnalyzePath
 {
 	Path		path;
 	Path	   *subpath;		/* path representing subquery execution */
-}			MaterialAnalyzePath;
+} MaterialAnalyzePath;
 
 
 /*

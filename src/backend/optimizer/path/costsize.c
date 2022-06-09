@@ -4168,12 +4168,7 @@ update_ma_path_cost(List *all_ma_node, Path *path)
 	path->parent->rows = path->rows = state->rows;
 
     /* Update path cost */
-    /* TODO: (zackery) maybe we should use cost_rescan */
-	cost_materialanalyze(path,
-				  mpath->subpath->startup_cost,
-				  mpath->subpath->total_cost,
-				  path->rows,
-				  mpath->subpath->pathtarget->width);
+    cost_rescan(NULL, path, &mpath->path.startup_cost, &mpath->path.total_cost);
 }
 
 /*
@@ -4341,7 +4336,32 @@ cost_rescan(PlannerInfo *root, Path *path,
 			break;
 		case T_Material:
 		case T_Sort:
-            /* TODO: (Zackery) MaterialAnalyze maybe have some problems */
+        {
+            /*
+             * These plan types not only materialize their results, but do
+             * not implement qual filtering or projection.  So they are
+             * even cheaper to rescan than the ones above.  We charge only
+             * cpu_operator_cost per tuple.  (Note: keep that in sync with
+             * the run_cost charge in cost_sort, and also see comments in
+             * cost_material before you change it.)
+             */
+            Cost		run_cost = cpu_operator_cost * path->rows;
+            double		nbytes = relation_byte_size(path->rows,
+                                                      path->pathtarget->width);
+            long		work_mem_bytes = work_mem * 1024L;
+
+            if (nbytes > work_mem_bytes)
+            {
+                /* It will spill, so account for re-read cost */
+                double		npages = ceil(nbytes / BLCKSZ);
+
+                run_cost += seq_page_cost * npages;
+            }
+            *rescan_startup_cost = 0;
+            *rescan_total_cost = run_cost;
+        }
+            break;
+            /* TODO: (Zackery) Need to support analyze in the future */
             /*
              * AQP NODES
              */

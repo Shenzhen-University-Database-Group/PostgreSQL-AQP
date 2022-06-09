@@ -1704,13 +1704,12 @@ create_materialanalyze_path(RelOptInfo *rel, Path *subpath)
 
 	pathnode->subpath = subpath;
 
-	cost_material(&pathnode->path,
+	cost_materialanalyze(&pathnode->path,
 				  subpath->startup_cost,
 				  subpath->total_cost,
 				  subpath->rows,
 				  subpath->pathtarget->width);
 
-/*     pathnode->path.manode_num = rel->aqp_version; */
 	pathnode->path.manode_num = subpath->manode_num + 1;
 
 	return pathnode;
